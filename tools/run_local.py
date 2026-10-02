@@ -9,6 +9,7 @@ import sys
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--uid', required=True, type=int)
 parser.add_argument('--binary', type=Path)
+parser.add_argument('--faults', action='store_true')
 args = parser.parse_args()
 if os.geteuid() != 0 or args.uid <= 0:
     raise SystemExit('Run setup as root and specify a non-root test user with --uid.')
@@ -19,6 +20,8 @@ try:
     command = ['runuser', '-u', user, '--', sys.executable, str(root / 'tests/run_probe.py')]
     if args.binary:
         command += ['--binary', str(args.binary.resolve())]
+    if args.faults:
+        command += ['--faults']
     result = subprocess.run(command, timeout=150)
 finally:
     subprocess.run([sys.executable, str(root / 'tools/tap.py'), 'remove'], check=True)

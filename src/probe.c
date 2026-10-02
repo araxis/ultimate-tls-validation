@@ -3,6 +3,7 @@
 #include "tap_network.h"
 #include "FreeRTOS.h"
 #include "task.h"
+#include "semphr.h"
 #include "mbedtls/version.h"
 #include "lwip/init.h"
 #include <stdio.h>
@@ -12,6 +13,7 @@
 static const char *ca_path;
 static int exit_status = 1;
 static unsigned checks, failures;
+static bool faults;
 
 static void check(bool passed, const char *label)
 {
@@ -74,6 +76,49 @@ static void exchange(const char *label, const char *host, uint16_t port,
     lwip_transport_destroy(&transport);
 }
 
+struct cancel_request {
+    lwip_transport *transport;
+    SemaphoreHandle_t completed;
+};
+
+static void cancel_task(void *context)
+{
+    struct cancel_request *request = context;
+    vTaskDelay(pdMS_TO_TICKS(50));
+    lwip_transport_cancel(request->transport);
+    xSemaphoreGive(request->completed);
+    vTaskDelete(NULL);
+}
+
+static void dns_fault(const char *label, const char *host, bool cancel)
+{
+    lwip_transport transport;
+    configASSERT(lwip_transport_init(&transport, ca_path) == 0);
+    tls_stream_port callbacks = lwip_transport_port(&transport);
+    tls_stream *stream = tls_stream_create(&callbacks);
+    configASSERT(stream);
+    struct cancel_request request = {&transport, NULL};
+    if (cancel) {
+        request.completed = xSemaphoreCreateBinary();
+        configASSERT(request.completed);
+        configASSERT(xTaskCreate(cancel_task, "cancel", 4096, &request, 2, NULL) == pdPASS);
+    }
+    int64_t start = callbacks.now_ms(&transport);
+    tls_status status = tls_stream_open(stream, host, 8443, cancel ? 5000 : 100);
+    int64_t elapsed = callbacks.now_ms(&transport) - start;
+    check(status == (cancel ? TLS_CANCELLED : TLS_TIMEOUT), label);
+    /* 250 ms scheduling allowance is a test tolerance, not a larger deadline. */
+    check(elapsed >= 0 && elapsed <= (cancel ? 300 : 350), "bounded DNS wait");
+    printf("RESULT %s status=%d elapsed_ms=%lld\n", label, status, (long long)elapsed);
+    if (cancel) {
+        configASSERT(xSemaphoreTake(request.completed, pdMS_TO_TICKS(1000)) == pdTRUE);
+        vSemaphoreDelete(request.completed);
+    }
+    tls_stream_destroy(stream);
+    check(transport.socket_fd == -1, "fault transport released");
+    lwip_transport_destroy(&transport);
+}
+
 static void client_task(void *context)
 {
     (void)context;
@@ -81,6 +126,14 @@ static void client_task(void *context)
     printf("FreeRTOS=%s lwIP=%s MbedTLS=%s\n", tskKERNEL_VERSION_NUMBER,
            LWIP_VERSION_STRING, MBEDTLS_VERSION_STRING);
     TickType_t start = xTaskGetTickCount();
+    if (faults) {
+        dns_fault("dns-timeout", "silent.lab.test", false);
+        dns_fault("dns-cancel", "cancel.lab.test", true);
+        dns_fault("dns-late-reply", "late.lab.test", false);
+        /* Give late callbacks time to run after their caller has been destroyed. */
+        vTaskDelay(pdMS_TO_TICKS(3000));
+        exchange("dns-recovery", "tls.lab.test", 8443, TLS_OK, 0, true, true);
+    } else {
     exchange("valid-chain", "tls.lab.test", 8443, TLS_OK, 0, true, true);
     exchange("wrong-host", "wrong.lab.test", 8443, TLS_ERROR, MBEDTLS_X509_BADCERT_CN_MISMATCH, true, true);
     exchange("recovery-after-host", "tls.lab.test", 8443, TLS_OK, 0, true, true);
@@ -89,6 +142,7 @@ static void client_task(void *context)
     exchange("missing-time", "tls.lab.test", 8443, TLS_TIME_UNAVAILABLE, 0, false, true);
     exchange("missing-entropy", "tls.lab.test", 8443, TLS_ERROR, 0, true, false);
     exchange("final-recovery", "tls.lab.test", 8443, TLS_OK, 0, true, true);
+    }
     uint32_t received, sent;
     tap_network_counts(&received, &sent);
     check(received > 0 && sent > 0, "traffic crossed lwIP TAP interface");
@@ -104,11 +158,12 @@ static void client_task(void *context)
 
 int main(int argc, char **argv)
 {
-    if (argc != 3) {
-        fprintf(stderr, "Usage: %s TAP_INTERFACE CA_FILE\n", argv[0]);
+    if (argc != 3 && !(argc == 4 && strcmp(argv[3], "--faults") == 0)) {
+        fprintf(stderr, "Usage: %s TAP_INTERFACE CA_FILE [--faults]\n", argv[0]);
         return 2;
     }
     ca_path = argv[2];
+    faults = argc == 4;
     if (tap_network_open(argv[1])) {
         perror("open private TAP interface");
         return 2;

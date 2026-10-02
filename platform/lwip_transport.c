@@ -19,6 +19,16 @@ static bool time_ready(void *context)
     return ((lwip_transport *)context)->clock_ready && time(NULL) >= 1577836800;
 }
 
+static bool cancelled(void *context)
+{
+    return atomic_load(&((lwip_transport *)context)->cancel_requested);
+}
+
+void lwip_transport_cancel(lwip_transport *transport)
+{
+    atomic_store(&transport->cancel_requested, true);
+}
+
 static int entropy(void *context, unsigned char *bytes, size_t length)
 {
     if (!((lwip_transport *)context)->entropy_ready) return -1;
@@ -113,6 +123,7 @@ int lwip_transport_init(lwip_transport *transport, const char *ca_file)
     transport->socket_fd = -1;
     transport->clock_ready = true;
     transport->entropy_ready = true;
+    atomic_init(&transport->cancel_requested, false);
     mbedtls_x509_crt_init(&transport->roots);
     return mbedtls_x509_crt_parse_file(&transport->roots, ca_file);
 }
@@ -121,6 +132,7 @@ tls_stream_port lwip_transport_port(lwip_transport *transport)
 {
     return (tls_stream_port){
         .context = transport, .now_ms = now_ms, .time_ready = time_ready,
+        .cancelled = cancelled,
         .entropy = entropy, .trust = trust, .open = open_socket,
         .read = receive_bytes, .write = send_bytes, .close = close_socket
     };

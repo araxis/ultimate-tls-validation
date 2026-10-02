@@ -61,7 +61,15 @@ class Peers:
         thread.start()
 
     def dns(self, listener):
+        pending = []
+        listener.settimeout(0.02)
         while not self.stop.is_set():
+            now = time.monotonic()
+            for due, response, peer in pending[:]:
+                if now >= due:
+                    listener.sendto(response, peer)
+                    self.record(kind='dns-late-reply')
+                    pending.remove((due, response, peer))
             try:
                 packet, peer = listener.recvfrom(512)
             except socket.timeout:
@@ -77,10 +85,17 @@ class Peers:
                 end = offset + 5
                 query_type, query_class = struct.unpack('!HH', packet[offset + 1:end])
                 name = '.'.join(labels)
-                accepted = name in ('tls.lab.test', 'wrong.lab.test') and query_type == 1 and query_class == 1
+                if name in ('silent.lab.test', 'cancel.lab.test'):
+                    self.record(kind='dns-drop', name=name)
+                    continue
+                accepted = name in ('tls.lab.test', 'wrong.lab.test', 'late.lab.test') and query_type == 1 and query_class == 1
                 answer = b'\xc0\x0c' + struct.pack('!HHIH', 1, 1, 60, 4) + socket.inet_aton(ADDRESS) if accepted else b''
                 header = packet[:2] + struct.pack('!HHHHH', 0x8180 if accepted else 0x8183, 1, int(accepted), 0, 0)
-                listener.sendto(header + packet[12:end] + answer, peer)
+                response = header + packet[12:end] + answer
+                if name == 'late.lab.test':
+                    pending.append((time.monotonic() + 0.6, response, peer))
+                else:
+                    listener.sendto(response, peer)
                 self.record(kind='dns', name=name, accepted=accepted)
             except (ValueError, IndexError, struct.error) as error:
                 self.record(kind='fixture-error', error=str(error))
@@ -142,6 +157,7 @@ class Peers:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary', type=Path, default=ROOT / 'build/tls_probe')
+    parser.add_argument('--faults', action='store_true')
     args = parser.parse_args()
     directory = ROOT / 'evidence' / datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
     directory.mkdir(parents=True)
@@ -152,7 +168,10 @@ def main():
     returncode, output, failure = None, '', None
     try:
         peers.start()
-        completed = subprocess.run([str(args.binary.resolve()), 'ult-tls0', str(directory / 'trusted-ca.pem')],
+        command = [str(args.binary.resolve()), 'ult-tls0', str(directory / 'trusted-ca.pem')]
+        if args.faults:
+            command.append('--faults')
+        completed = subprocess.run(command,
                                    text=True, capture_output=True, timeout=75)
         returncode = completed.returncode
         output = completed.stdout + completed.stderr
@@ -177,10 +196,21 @@ def main():
                                                'tls.lab.test', 'tls.lab.test', 'tls.lab.test']
                and dns == {'tls.lab.test', 'wrong.lab.test'}
                and not any(event['kind'] == 'fixture-error' for event in peers.events))
-    passed = (returncode == 0 and summary is not None and int(summary[1]) == 32 and int(summary[2]) == 0
+    expected_checks = 32
+    if args.faults:
+        complete = attempts == ['dns-timeout', 'dns-cancel', 'dns-late-reply', 'dns-recovery']
+        dropped = {event['name'] for event in peers.events if event['kind'] == 'dns-drop'}
+        peer_ok = (len(requests) == 1 and requests[0]['exact'] and requests[0]['server'] == 'trusted'
+                   and not alerts and sni == ['tls.lab.test'] and dns == {'tls.lab.test', 'late.lab.test'}
+                   and dropped == {'silent.lab.test', 'cancel.lab.test'}
+                   and any(event['kind'] == 'dns-late-reply' for event in peers.events)
+                   and not any(event['kind'] == 'fixture-error' for event in peers.events))
+        expected_checks = 16
+    passed = (returncode == 0 and summary is not None and int(summary[1]) == expected_checks and int(summary[2]) == 0
               and all(int(summary[index]) > 0 for index in (3, 4, 5))
               and complete and peer_ok and failure is None)
     report = {'passed': passed, 'returncode': returncode, 'failure': failure,
+              'suite': 'dns-faults' if args.faults else 'baseline',
               'elapsed_seconds': time.monotonic() - start, 'peer_accounting_passed': peer_ok,
               'complete_attempts': complete,
               'checks': int(summary[1]) if summary else None,
