@@ -205,7 +205,16 @@ class Peers:
             finally:
                 connection.close()
 
-    def start(self):
+    def start(self, connections=False):
+        if connections:
+            # Reserve both ports without listen(): the kernel refuses any SYN
+            # that reaches these sockets. No other process can claim the ports.
+            for port in (8448, 8449):
+                reserved = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.sockets.append(reserved)
+                reserved.bind((ADDRESS, port))
+                self.record(kind='reserved-port', port=port,
+                            listening=bool(reserved.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN)))
         self.listen(socket.SOCK_DGRAM, 1053, self.dns)
         self.listen(socket.SOCK_STREAM, 8443, self.tls, 'trusted')
         self.listen(socket.SOCK_STREAM, 8444, self.tls, 'untrusted')
@@ -229,6 +238,7 @@ def main():
     suites = parser.add_mutually_exclusive_group()
     suites.add_argument('--faults', action='store_true')
     suites.add_argument('--pressure', action='store_true')
+    suites.add_argument('--connections', action='store_true')
     args = parser.parse_args()
     directory = ROOT / 'evidence' / datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
     directory.mkdir(parents=True)
@@ -245,12 +255,14 @@ def main():
     start = time.monotonic()
     returncode, output, failure = None, '', None
     try:
-        peers.start()
+        peers.start(connections=args.connections)
         command = [str(args.binary.resolve()), 'ult-tls0', str(directory / 'trusted-ca.pem')]
         if args.faults:
             command.append('--faults')
         if args.pressure:
             command.append('--pressure')
+        if args.connections:
+            command.append('--connections')
         completed = subprocess.run(command,
                                    text=True, capture_output=True, timeout=75)
         returncode = completed.returncode
@@ -302,11 +314,20 @@ def main():
                    and len(stalls) == 2 and all(event['queued_bytes_peak'] > 0 and event['closed'] for event in stalls)
                    and not any(event['kind'] == 'fixture-error' for event in peers.events))
         expected_checks = 61
+    if args.connections:
+        complete = attempts == ['connect-refused', 'connect-timeout', 'connect-cancel', 'connect-recovery']
+        reserved = [event for event in peers.events if event['kind'] == 'reserved-port']
+        peer_ok = (len(requests) == 1 and requests[0]['exact'] and requests[0]['server'] == 'trusted'
+                   and not alerts and sni == ['tls.lab.test'] and dns == {'tls.lab.test'}
+                   and [event['port'] for event in reserved] == [8448, 8449]
+                   and all(not event['listening'] for event in reserved)
+                   and not any(event['kind'] == 'fixture-error' for event in peers.events))
+        expected_checks = 42
     passed = (returncode == 0 and summary is not None and int(summary[1]) == expected_checks and int(summary[2]) == 0
               and all(int(summary[index]) > 0 for index in (3, 4, 5))
               and complete and peer_ok and failure is None)
     report = {'passed': passed, 'returncode': returncode, 'failure': failure,
-              'suite': 'pressure' if args.pressure else 'wait-faults' if args.faults else 'baseline',
+              'suite': 'connections' if args.connections else 'pressure' if args.pressure else 'wait-faults' if args.faults else 'baseline',
               'elapsed_seconds': time.monotonic() - start, 'peer_accounting_passed': peer_ok,
               'complete_attempts': complete,
               'checks': int(summary[1]) if summary else None,

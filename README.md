@@ -52,6 +52,7 @@ The private subnet is `192.0.2.0/30`: Linux is `.1`, lwIP is `.2`. The fixture
 uses DNS port 1053 and TLS ports 8443 through 8447, bound only to `.1`. Do not run multiple
 probes concurrently on this interface. Certificates and private test keys are
 created per run under ignored `evidence/`; they are never installation roots.
+The connection-fault suite also reserves TCP ports 8448 and 8449 without listening.
 
 For undefined-behavior instrumentation of the executable and its dependencies:
 
@@ -61,6 +62,7 @@ cmake --build build/ubsan -j 4
 sudo python3 tools/run_local.py --uid "$(id -u)" --binary build/ubsan/tls_probe
 sudo python3 tools/run_local.py --uid "$(id -u)" --binary build/ubsan/tls_probe --faults
 sudo python3 tools/run_local.py --uid "$(id -u)" --binary build/ubsan/tls_probe --pressure
+sudo python3 tools/run_local.py --uid "$(id -u)" --binary build/ubsan/tls_probe --connections
 ```
 
 Each run writes `probe.log`, `peer-events.json`, `source-manifest.json` and
@@ -99,6 +101,18 @@ These are bounded functional checks on the reference port. Callback-message,
 netconn and TCP PCB pool restoration does not establish whole-process or TLS
 heap leak freedom. The core gate and write observer live only in the test driver.
 
+The `--connections` suite has 42 checks: a real TCP refusal, a connection timeout,
+cancellation after an emitted SYN, and a verified recovery exchange. The peer
+reserves two ports without listening, so any SYN reaching either port is refused.
+The test driver temporarily wraps the lwIP interface's output to discard SYNs
+for only the stalled port. A semaphore reports the emitted SYN before another
+task requests cancellation. This exercises the actual nonblocking TCP connect
+path without changing host firewall rules or adding transport hooks. The wrapper
+is installed and restored on the TCP/IP task, with a completion barrier before
+releasing its semaphore. Each failure checks immediate socket release, safe
+destruction and restoration of netconn, TCP PCB and TCP segment pools. These
+short cases do not cover TCP retransmission exhaustion or network recovery races.
+
 Socket waits poll the atomic cancellation flag in slices of at most 10 ms. DNS
 submission to the TCP/IP task is nonblocking. Already submitted DNS queries can
 continue after the caller has returned; the fixed `DNS_TABLE_SIZE` slot pool
@@ -130,8 +144,7 @@ operator. The missing-time test exercises the explicit clock-unavailable path,
 not a simulated expired certificate. TLS 1.3 and custom end-user root provisioning
 are outside this first exercise.
 
-Known remaining work: connect refusal/stall/cancellation; cancellation boundary
-races; expired/future
+Known remaining work: cancellation boundary races; expired/future
 certificates; transport truncation; allocation failures; full socket/heap/queue
 accounting; concurrent sessions; performance budgets; a second port.
 The current destroy operation aborts TCP after releasing the stream and does not
