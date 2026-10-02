@@ -17,6 +17,7 @@ suite.add_argument('--sessions', action='store_true')
 suite.add_argument('--security', action='store_true')
 suite.add_argument('--allocations', action='store_true')
 suite.add_argument('--handshake-allocations', action='store_true')
+suite.add_argument('--records', action='store_true')
 args = parser.parse_args()
 if os.geteuid() != 0 or args.uid <= 0:
     raise SystemExit('Run setup as root and specify a non-root test user with --uid.')
@@ -41,6 +42,8 @@ try:
         command += ['--allocations']
     if args.handshake_allocations:
         command += ['--handshake-allocations']
+    if args.records:
+        command += ['--records']
     result = subprocess.run(command, timeout=150)
 finally:
     subprocess.run([sys.executable, str(root / 'tools/tap.py'), 'remove'], check=True)

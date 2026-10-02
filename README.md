@@ -56,6 +56,7 @@ The connection-fault suite also reserves TCP ports 8448 and 8449 without listeni
 The session suite uses binary TLS peers on ports 8450 through 8455.
 The certificate/closure suite uses ports 8456 through 8463.
 The handshake allocation suite uses a dedicated TLS peer on port 8464.
+The malformed-record suite uses ports 8465 through 8472.
 
 For undefined-behavior instrumentation of the executable and its dependencies:
 
@@ -70,6 +71,7 @@ sudo python3 tools/run_local.py --uid "$(id -u)" --binary build/ubsan/tls_probe 
 sudo python3 tools/run_local.py --uid "$(id -u)" --binary build/ubsan/tls_probe --security
 sudo python3 tools/run_local.py --uid "$(id -u)" --binary build/ubsan/tls_probe --allocations
 sudo python3 tools/run_local.py --uid "$(id -u)" --binary build/ubsan/tls_probe --handshake-allocations
+sudo python3 tools/run_local.py --uid "$(id -u)" --binary build/ubsan/tls_probe --records
 ```
 
 Each run writes `probe.log`, `peer-events.json`, `source-manifest.json` and
@@ -197,6 +199,28 @@ This extends per-task calloc/free coverage into the handshake; it does not cover
 all allocation calls, malloc/realloc, other tasks, full heap usage or firmware
 memory limits. No TLS implementation or dependency allocation policy is changed.
 
+The `--records` suite has 103 checks across eight selected post-handshake faults:
+unknown record type, invalid version, zero ciphertext length, oversized advertised
+length, single-bit corruption of the explicit nonce, ciphertext and authentication
+tag, and replay of an already accepted encrypted record. OpenSSL memory BIOs build
+the original TLS 1.2 AES-GCM records after a verified handshake and client marker.
+Peer evidence retains both original and transmitted ciphertext; a separate checker
+verifies the exact header changes, bit offsets and duplicated bytes. The peers keep
+TCP open until the client closes, so rejection cannot rely on a preceding peer EOF.
+
+Each case requires TLS_ERROR during read, its exact dependency diagnostic, prompt
+socket release, an untouched caller buffer on failed reads and refusal of later
+reads/writes without overwriting the original diagnostic. The replay case returns
+the authenticated original payload exactly once; the other cases return no
+application bytes. A verified HTTPS exchange confirms subsequent recovery.
+The oversized header returns MBEDTLS_ERR_SSL_BAD_INPUT_DATA from the pinned
+dependency's input-buffer bound; the other malformed headers return
+MBEDTLS_ERR_SSL_INVALID_RECORD, and the four authentication failures return
+MBEDTLS_ERR_SSL_INVALID_MAC. Zero ciphertext length here is a malformed wire
+record, not a valid encrypted record carrying an empty application payload.
+These deterministic examples do not replace fuzzing, handshake-message validation,
+all length boundaries, other cipher suites or whole-process memory accounting.
+
 Socket waits poll the atomic cancellation flag in slices of at most 10 ms. DNS
 submission to the TCP/IP task is nonblocking. Already submitted DNS queries can
 continue after the caller has returned; the fixed `DNS_TABLE_SIZE` slot pool
@@ -229,7 +253,7 @@ not a simulated expired certificate. TLS 1.3 and custom end-user root provisioni
 are outside this first exercise.
 
 Known remaining work: broader cancellation/close-notify and deadline races;
-exhaustive handshake and transport/kernel allocation failures; malformed records;
+exhaustive handshake and transport/kernel allocation failures; broader malformed-input coverage;
 full socket/heap/queue accounting; broader concurrency; performance budgets; a second port.
 The current destroy operation releases the socket with zero linger and does not
 perform a potentially blocking bidirectional TLS shutdown. TCP closing/TIME_WAIT
