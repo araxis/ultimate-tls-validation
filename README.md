@@ -55,6 +55,7 @@ created per run under ignored `evidence/`; they are never installation roots.
 The connection-fault suite also reserves TCP ports 8448 and 8449 without listening.
 The session suite uses binary TLS peers on ports 8450 through 8455.
 The certificate/closure suite uses ports 8456 through 8463.
+The handshake allocation suite uses a dedicated TLS peer on port 8464.
 
 For undefined-behavior instrumentation of the executable and its dependencies:
 
@@ -68,6 +69,7 @@ sudo python3 tools/run_local.py --uid "$(id -u)" --binary build/ubsan/tls_probe 
 sudo python3 tools/run_local.py --uid "$(id -u)" --binary build/ubsan/tls_probe --sessions
 sudo python3 tools/run_local.py --uid "$(id -u)" --binary build/ubsan/tls_probe --security
 sudo python3 tools/run_local.py --uid "$(id -u)" --binary build/ubsan/tls_probe --allocations
+sudo python3 tools/run_local.py --uid "$(id -u)" --binary build/ubsan/tls_probe --handshake-allocations
 ```
 
 Each run writes `probe.log`, `peer-events.json`, `source-manifest.json` and
@@ -175,6 +177,26 @@ internals, handshake-time allocations, lwIP pools and FreeRTOS heap exhaustion a
 outside this sweep. The reported peak is requested calloc payload on this host,
 not allocator overhead or an embedded RAM requirement.
 
+The separate `--handshake-allocations` suite opens real TCP connections before
+arming injection. Its first verified handshake measures the observed allocation
+call count. It then fails the first 16 calls, the last 8, and 16 evenly spaced
+later calls, deduplicated into at most 39 injected attempts. These are sampled
+call ordinals, not exhaustive source allocation sites. A selected call that is
+not reached fails the test; the suite does not silently skip it or assume that
+randomized handshakes always have identical allocation paths.
+
+Each injected attempt must fail during TLS handshake, close its socket promptly,
+and free every tracked allocation after stream and trust-store destruction.
+Logs distinguish allocations retained at open return from those retained after
+destruction, and report the requested-byte peak. The dedicated peer accounts for
+every TCP connection independently, including expected handshake aborts. The
+uninjected attempts before and after the sample must exchange exact binary
+markers and receive authenticated close_notify; a normal HTTPS recovery follows.
+The observed 6,231-call handshake gives 39 selected failures and 294 checks.
+This extends per-task calloc/free coverage into the handshake; it does not cover
+all allocation calls, malloc/realloc, other tasks, full heap usage or firmware
+memory limits. No TLS implementation or dependency allocation policy is changed.
+
 Socket waits poll the atomic cancellation flag in slices of at most 10 ms. DNS
 submission to the TCP/IP task is nonblocking. Already submitted DNS queries can
 continue after the caller has returned; the fixed `DNS_TABLE_SIZE` slot pool
@@ -207,8 +229,8 @@ not a simulated expired certificate. TLS 1.3 and custom end-user root provisioni
 are outside this first exercise.
 
 Known remaining work: broader cancellation/close-notify and deadline races;
-handshake/transport/kernel allocation failures; malformed records; full socket/heap/queue
-accounting; concurrent sessions; performance budgets; a second port.
+exhaustive handshake and transport/kernel allocation failures; malformed records;
+full socket/heap/queue accounting; broader concurrency; performance budgets; a second port.
 The current destroy operation releases the socket with zero linger and does not
 perform a potentially blocking bidirectional TLS shutdown. TCP closing/TIME_WAIT
 state may outlive that socket; platform resource budgets must include it.

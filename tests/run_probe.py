@@ -18,6 +18,7 @@ import time
 from session_peers import serve_sessions, session_accounting
 from security_peers import make_dated_certificates, serve_closure
 from record_peer import serve_record_cut
+from allocation_peer import serve_allocations, allocation_accounting
 
 ROOT = Path(__file__).resolve().parents[1]
 ADDRESS = '192.0.2.1'
@@ -209,7 +210,9 @@ class Peers:
             finally:
                 connection.close()
 
-    def start(self, connections=False, sessions=False, security=False):
+    def start(self, connections=False, sessions=False, security=False, handshake_allocations=False):
+        if handshake_allocations:
+            self.listen(socket.SOCK_STREAM, 8464, lambda listener: serve_allocations(self, listener))
         if security:
             for port, mode in ((8461, 'header'), (8462, 'body'), (8463, 'tag')):
                 self.listen(socket.SOCK_STREAM, port,
@@ -259,6 +262,7 @@ def main():
     suites.add_argument('--sessions', action='store_true')
     suites.add_argument('--security', action='store_true')
     suites.add_argument('--allocations', action='store_true')
+    suites.add_argument('--handshake-allocations', action='store_true')
     args = parser.parse_args()
     directory = ROOT / 'evidence' / datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
     directory.mkdir(parents=True)
@@ -277,7 +281,8 @@ def main():
     start = time.monotonic()
     returncode, output, failure = None, '', None
     try:
-        peers.start(connections=args.connections, sessions=args.sessions, security=args.security)
+        peers.start(connections=args.connections, sessions=args.sessions, security=args.security,
+                    handshake_allocations=args.handshake_allocations)
         command = [str(args.binary.resolve()), 'ult-tls0', str(directory / 'trusted-ca.pem')]
         if args.faults:
             command.append('--faults')
@@ -291,6 +296,8 @@ def main():
             command.append('--security')
         if args.allocations:
             command.append('--allocations')
+        if args.handshake_allocations:
+            command.append('--handshake-allocations')
         completed = subprocess.run(command,
                                    text=True, capture_output=True, timeout=75)
         returncode = completed.returncode
@@ -389,11 +396,27 @@ def main():
                    and not alerts and sni == ['tls.lab.test'] and dns == {'tls.lab.test'}
                    and not any(event['kind'] == 'fixture-error' for event in peers.events))
         expected_checks = 4 * (sites + 2) + 1 + 7
+    if args.handshake_allocations:
+        allocation_summary = re.search(r'^HANDSHAKE_ALLOCATIONS sites=(\d+)$', output, re.MULTILINE)
+        sites = int(allocation_summary[1]) if allocation_summary else 0
+        selected = list(range(1, min(sites, 16) + 1))
+        if sites > 16:
+            selected += sorted({16 + (sites - 16) * i // 16 for i in range(1, 17)} - {16})
+        selected = sorted(set(selected) | set(range(max(1, sites - 7), sites + 1)))
+        expected_indexes = [0] + selected + [0]
+        indexes = [int(index) for index in re.findall(r'^RESULT handshake-allocation index=(\d+) ', output, re.MULTILINE)]
+        complete = (0 < sites <= 100000 and indexes == expected_indexes
+                    and attempts == ['handshake-allocation'] * len(expected_indexes) + ['handshake-allocations-recovery'])
+        peer_ok = (allocation_accounting(peers.events, expected_indexes)
+                   and len(requests) == 1 and requests[0]['exact'] and requests[0]['server'] == 'trusted'
+                   and not alerts and sni == ['tls.lab.test'] and dns == {'tls.lab.test'}
+                   and not any(event['kind'] == 'fixture-error' for event in peers.events))
+        expected_checks = 7 * len(expected_indexes) + 7
     passed = (returncode == 0 and summary is not None and int(summary[1]) == expected_checks and int(summary[2]) == 0
               and all(int(summary[index]) > 0 for index in (3, 4, 5))
               and complete and peer_ok and failure is None)
     report = {'passed': passed, 'returncode': returncode, 'failure': failure,
-              'suite': 'allocations' if args.allocations else 'security' if args.security else 'sessions' if args.sessions else 'connections' if args.connections else 'pressure' if args.pressure else 'wait-faults' if args.faults else 'baseline',
+              'suite': 'handshake-allocations' if args.handshake_allocations else 'allocations' if args.allocations else 'security' if args.security else 'sessions' if args.sessions else 'connections' if args.connections else 'pressure' if args.pressure else 'wait-faults' if args.faults else 'baseline',
               'elapsed_seconds': time.monotonic() - start, 'peer_accounting_passed': peer_ok,
               'complete_attempts': complete,
               'checks': int(summary[1]) if summary else None,
