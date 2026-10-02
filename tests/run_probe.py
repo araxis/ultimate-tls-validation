@@ -52,6 +52,8 @@ class Peers:
     def listen(self, kind, port, target, *arguments):
         listener = socket.socket(socket.AF_INET, kind)
         self.sockets.append(listener)
+        if kind == socket.SOCK_STREAM:
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         listener.bind((ADDRESS, port))
         listener.settimeout(0.2)
         if kind == socket.SOCK_STREAM:
@@ -100,7 +102,24 @@ class Peers:
             except (ValueError, IndexError, struct.error) as error:
                 self.record(kind='fixture-error', error=str(error))
 
-    def tls(self, listener, name):
+    def handshake_stall(self, listener):
+        while not self.stop.is_set():
+            try:
+                connection, _ = listener.accept()
+            except socket.timeout:
+                continue
+            with connection:
+                connection.settimeout(6)
+                self.record(kind='stall', phase='handshake')
+                try:
+                    while connection.recv(4096):
+                        pass
+                except ConnectionResetError:
+                    pass
+                except OSError as error:
+                    self.record(kind='fixture-error', error=str(error))
+
+    def tls(self, listener, name, stall=False):
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.minimum_version = context.maximum_version = ssl.TLSVersion.TLSv1_2
         context.set_ciphers('ECDHE-RSA-AES128-GCM-SHA256')
@@ -124,6 +143,13 @@ class Peers:
                                 protocol=stream.version(), cipher=stream.cipher()[0])
                     if request != REQUEST:
                         raise ValueError('unexpected HTTP request')
+                    if stall:
+                        self.record(kind='stall', phase='read')
+                        try:
+                            stream.recv(1)
+                        except (ConnectionResetError, ssl.SSLEOFError):
+                            pass
+                        continue
                     # Several TLS records exercise stream assembly.
                     for offset in range(0, len(RESPONSE), 7):
                         stream.sendall(RESPONSE[offset:offset + 7])
@@ -143,6 +169,8 @@ class Peers:
         self.listen(socket.SOCK_DGRAM, 1053, self.dns)
         self.listen(socket.SOCK_STREAM, 8443, self.tls, 'trusted')
         self.listen(socket.SOCK_STREAM, 8444, self.tls, 'untrusted')
+        self.listen(socket.SOCK_STREAM, 8445, self.handshake_stall)
+        self.listen(socket.SOCK_STREAM, 8446, self.tls, 'trusted', True)
 
     def close(self):
         self.stop.set()
@@ -198,19 +226,22 @@ def main():
                and not any(event['kind'] == 'fixture-error' for event in peers.events))
     expected_checks = 32
     if args.faults:
-        complete = attempts == ['dns-timeout', 'dns-cancel', 'dns-late-reply', 'dns-recovery']
+        complete = attempts == ['dns-timeout', 'dns-cancel', 'dns-late-reply', 'handshake-timeout',
+                                'handshake-cancel', 'read-timeout', 'read-cancel', 'dns-recovery']
         dropped = {event['name'] for event in peers.events if event['kind'] == 'dns-drop'}
-        peer_ok = (len(requests) == 1 and requests[0]['exact'] and requests[0]['server'] == 'trusted'
-                   and not alerts and sni == ['tls.lab.test'] and dns == {'tls.lab.test', 'late.lab.test'}
+        stalls = [event['phase'] for event in peers.events if event['kind'] == 'stall']
+        peer_ok = (len(requests) == 3 and all(event['exact'] and event['server'] == 'trusted' for event in requests)
+                   and not alerts and sni == ['tls.lab.test'] * 3 and dns == {'tls.lab.test', 'late.lab.test'}
+                   and stalls == ['handshake', 'handshake', 'read', 'read']
                    and dropped == {'silent.lab.test', 'cancel.lab.test'}
                    and any(event['kind'] == 'dns-late-reply' for event in peers.events)
                    and not any(event['kind'] == 'fixture-error' for event in peers.events))
-        expected_checks = 16
+        expected_checks = 40
     passed = (returncode == 0 and summary is not None and int(summary[1]) == expected_checks and int(summary[2]) == 0
               and all(int(summary[index]) > 0 for index in (3, 4, 5))
               and complete and peer_ok and failure is None)
     report = {'passed': passed, 'returncode': returncode, 'failure': failure,
-              'suite': 'dns-faults' if args.faults else 'baseline',
+              'suite': 'wait-faults' if args.faults else 'baseline',
               'elapsed_seconds': time.monotonic() - start, 'peer_accounting_passed': peer_ok,
               'complete_attempts': complete,
               'checks': int(summary[1]) if summary else None,

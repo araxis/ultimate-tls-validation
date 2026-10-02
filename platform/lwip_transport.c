@@ -1,6 +1,6 @@
 #include "lwip_transport.h"
+#include "lwip_dns.h"
 #include "lwip/sockets.h"
-#include "lwip/netdb.h"
 #include <errno.h>
 #include <sys/random.h>
 #include <time.h>
@@ -48,32 +48,50 @@ static int trust(void *context, mbedtls_ssl_config *config)
     return 0;
 }
 
-static int wait_socket(int fd, bool writing, uint32_t milliseconds)
+struct operation {
+    lwip_transport *transport;
+    int64_t started_ms;
+    uint32_t budget_ms;
+};
+
+static uint32_t remaining_ms(void *context)
 {
-    fd_set descriptors;
-    FD_ZERO(&descriptors);
-    FD_SET(fd, &descriptors);
-    struct timeval timeout = {milliseconds / 1000, (milliseconds % 1000) * 1000};
-    return lwip_select(fd + 1, writing ? NULL : &descriptors,
-                       writing ? &descriptors : NULL, NULL, &timeout) == 1 ? 0 : -1;
+    struct operation *operation = context;
+    int64_t now = now_ms(NULL);
+    if (cancelled(operation->transport) || now < operation->started_ms ||
+        now - operation->started_ms >= operation->budget_ms) return 0;
+    return operation->budget_ms - (uint32_t)(now - operation->started_ms);
+}
+
+static int wait_socket(int fd, bool writing, struct operation *operation)
+{
+    uint32_t left;
+    while ((left = remaining_ms(operation)) != 0) {
+        fd_set descriptors;
+        FD_ZERO(&descriptors);
+        FD_SET(fd, &descriptors);
+        /* Poll cancellation between bounded waits, with one operation budget. */
+        uint32_t slice = left < 10 ? left : 10;
+        struct timeval timeout = {0, slice * 1000};
+        int result = lwip_select(fd + 1, writing ? NULL : &descriptors,
+                                writing ? &descriptors : NULL, NULL, &timeout);
+        if (result > 0) return remaining_ms(operation) ? 0 : -1;
+        if (result < 0 && errno != EINTR) return -1;
+    }
+    return -1;
 }
 
 static int open_socket(void *context, const char *host, uint16_t port, uint32_t budget)
 {
     lwip_transport *transport = context;
-    struct addrinfo hints = {0}, *address = NULL;
-    int64_t start = now_ms(context);
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    /* lwIP DNS retries are bounded by lwipopts.h. Check the overall budget
-     * again before creating a socket; later fault tests qualify cancellation. */
-    if (lwip_getaddrinfo(host, NULL, &hints, &address)) return -1;
-    int64_t elapsed = now_ms(context) - start;
-    if (elapsed < 0 || elapsed >= budget) {
-        lwip_freeaddrinfo(address);
-        return -1;
-    }
-    ((struct sockaddr_in *)address->ai_addr)->sin_port = htons(port);
+    struct operation operation = {transport, now_ms(context), budget};
+    ip_addr_t resolved;
+    if (lwip_dns_resolve(host, &resolved, remaining_ms, &operation) ||
+        !remaining_ms(&operation)) return -1;
+    struct sockaddr_in address = {0};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(port);
+    address.sin_addr.s_addr = ip4_addr_get_u32(ip_2_ip4(&resolved));
     transport->socket_fd = lwip_socket(AF_INET, SOCK_STREAM, 0);
     int fd = transport->socket_fd;
     int result = -1;
@@ -82,30 +100,31 @@ static int open_socket(void *context, const char *host, uint16_t port, uint32_t 
     if (fd >= 0 && lwip_setsockopt(fd, SOL_SOCKET, SO_LINGER, &abort_on_close,
                                  sizeof(abort_on_close)) == 0 &&
         lwip_fcntl(fd, F_SETFL, O_NONBLOCK) == 0) {
-        result = lwip_connect(fd, address->ai_addr, address->ai_addrlen);
+        result = lwip_connect(fd, (struct sockaddr *)&address, sizeof(address));
         if (result < 0 && errno == EINPROGRESS &&
-            wait_socket(fd, true, budget - (uint32_t)elapsed) == 0) {
+            wait_socket(fd, true, &operation) == 0) {
             int error = 0;
             socklen_t size = sizeof(error);
             result = lwip_getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &size);
             if (error) result = -1;
         }
     }
-    lwip_freeaddrinfo(address);
     return result;
 }
 
 static int receive_bytes(void *context, uint8_t *bytes, size_t length, uint32_t budget)
 {
     int fd = ((lwip_transport *)context)->socket_fd;
-    if (wait_socket(fd, false, budget)) return -1;
+    struct operation operation = {context, now_ms(context), budget};
+    if (wait_socket(fd, false, &operation)) return -1;
     return (int)lwip_recv(fd, bytes, length, 0);
 }
 
 static int send_bytes(void *context, const uint8_t *bytes, size_t length, uint32_t budget)
 {
     int fd = ((lwip_transport *)context)->socket_fd;
-    if (wait_socket(fd, true, budget)) return -1;
+    struct operation operation = {context, now_ms(context), budget};
+    if (wait_socket(fd, true, &operation)) return -1;
     return (int)lwip_send(fd, bytes, length, 0);
 }
 
