@@ -4,6 +4,7 @@
 #include "tls_stream.h"
 #include "mbedtls/ctr_drbg.h"
 #include <stdlib.h>
+#include <string.h>
 
 #if !defined(MBEDTLS_HAVE_TIME_DATE)
 #error "HTTPS requires certificate validity date verification"
@@ -175,10 +176,13 @@ int tls_stream_read(tls_stream *s, uint8_t *bytes, size_t length)
     if (!s || !s->connected || !bytes || !length) return -1;
     if (s->eof) return 0;
     s->stage = TLS_STAGE_READ;
+    /* A buffered read can complete without a transport callback. Keep its
+     * output private until the final cancellation/deadline check succeeds. */
+    uint8_t pending[512];
     int n;
     do {
         if (!budget(s)) { close_stream(s); return -1; }
-        n = mbedtls_ssl_read(&s->ssl, bytes, length > 512 ? 512 : length);
+        n = mbedtls_ssl_read(&s->ssl, pending, length > sizeof(pending) ? sizeof(pending) : length);
         s->code = n < 0 ? n : 0;
     } while (retry(n));
     if (!budget(s)) { close_stream(s); return -1; }
@@ -187,6 +191,7 @@ int tls_stream_read(tls_stream *s, uint8_t *bytes, size_t length)
         if (s->status == TLS_OK) s->status = n == 0 ? TLS_TRUNCATED : TLS_ERROR;
         close_stream(s); return -1;
     }
+    memcpy(bytes, pending, (size_t)n);
     return n;
 }
 

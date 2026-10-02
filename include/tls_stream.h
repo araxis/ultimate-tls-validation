@@ -47,6 +47,12 @@ typedef struct {
 /* One connection per instance, owned by one task. Carries arbitrary bytes.
  * One total deadline covers open and subsequent reads/writes. destroy releases
  * the transport and all TLS state on success or failure; no implicit retry.
+ * Read output is committed only after the final cancellation/deadline check;
+ * a failed or EOF read leaves the caller buffer unchanged. Cancellation wins
+ * if it and expiry are both observed at the same check. Once authenticated
+ * EOF has been returned, subsequent reads remain EOF even if later cancelled
+ * or expired. A failed write may already have delivered bytes to the peer;
+ * it must not be retried on this handle. destroy is still required after EOF.
  * DNS hostnames/IPv4 literals only in this initial validation implementation.
  */
 tls_stream *tls_stream_create(const tls_stream_port *port);

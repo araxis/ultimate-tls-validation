@@ -57,6 +57,7 @@ The session suite uses binary TLS peers on ports 8450 through 8455.
 The certificate/closure suite uses ports 8456 through 8463.
 The handshake allocation suite uses a dedicated TLS peer on port 8464.
 The malformed-record suite uses ports 8465 through 8472.
+The completion-boundary suite uses ports 8473 through 8484.
 
 For undefined-behavior instrumentation of the executable and its dependencies:
 
@@ -72,6 +73,7 @@ sudo python3 tools/run_local.py --uid "$(id -u)" --binary build/ubsan/tls_probe 
 sudo python3 tools/run_local.py --uid "$(id -u)" --binary build/ubsan/tls_probe --allocations
 sudo python3 tools/run_local.py --uid "$(id -u)" --binary build/ubsan/tls_probe --handshake-allocations
 sudo python3 tools/run_local.py --uid "$(id -u)" --binary build/ubsan/tls_probe --records
+sudo python3 tools/run_local.py --uid "$(id -u)" --binary build/ubsan/tls_probe --boundaries
 ```
 
 Each run writes `probe.log`, `peer-events.json`, `source-manifest.json` and
@@ -220,6 +222,34 @@ MBEDTLS_ERR_SSL_INVALID_MAC. Zero ciphertext length here is a malformed wire
 record, not a valid encrypted record carrying an empty application payload.
 These deterministic examples do not replace fuzzing, handshake-message validation,
 all length boundaries, other cipher suites or whole-process memory accounting.
+
+The `--boundaries` suite has 155 checks across 12 controlled completion orderings.
+It expires the stream after TCP open, before/after an application write, after a
+buffered read, after verified handshake completion and after decoding authenticated
+close_notify. Cancellation from a synchronized FreeRTOS task exercises the last
+three completion points; a simultaneous buffered-read case verifies cancellation
+precedence. Other cases verify that a 3,000 ms total budget forwards only 2,000 ms
+to write and 1,000 ms to read as time advances, and that already-returned authenticated
+EOF remains terminal after later expiry/cancellation.
+
+The fixture controls only the stream's monotonic clock; certificate UTC and lwIP
+transport timers remain real. Wire framing identifies the final encrypted handshake
+record and close alert without decrypting or changing bytes. The trigger skips the
+transport callback's completion check and fires at the following TLS completion
+check; successful decode diagnostics are required. Buffered cases first consume
+one byte of an authenticated record, then verify that the next read performs no
+transport receive. The fixtures prove these selected orderings, not every scheduler
+interleaving or hard real-time timing. Normal host-clock wait tests remain separate.
+
+These tests reproduced a buffered-read bug: TLS had already copied authenticated
+plaintext into the caller buffer when the final deadline/cancellation check rejected
+the operation. Reads now stage at most 512 bytes on the stack and copy to the caller
+only after that check succeeds. Failed and EOF reads leave the caller buffer unchanged.
+This adds a bounded stack buffer and a copy per successful read; embedded stack and
+performance costs still require qualification. No heap allocation or public handle
+layout change is introduced. A failed write may already have reached the peer, so
+failure does not authorize automatic retry. All failed handles remain unusable;
+authenticated EOF still requires destruction to release the socket.
 
 Socket waits poll the atomic cancellation flag in slices of at most 10 ms. DNS
 submission to the TCP/IP task is nonblocking. Already submitted DNS queries can
