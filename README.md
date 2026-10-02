@@ -53,6 +53,7 @@ uses DNS port 1053 and TLS ports 8443 through 8447, bound only to `.1`. Do not r
 probes concurrently on this interface. Certificates and private test keys are
 created per run under ignored `evidence/`; they are never installation roots.
 The connection-fault suite also reserves TCP ports 8448 and 8449 without listening.
+The session suite uses binary TLS peers on ports 8450 through 8455.
 
 For undefined-behavior instrumentation of the executable and its dependencies:
 
@@ -63,6 +64,7 @@ sudo python3 tools/run_local.py --uid "$(id -u)" --binary build/ubsan/tls_probe
 sudo python3 tools/run_local.py --uid "$(id -u)" --binary build/ubsan/tls_probe --faults
 sudo python3 tools/run_local.py --uid "$(id -u)" --binary build/ubsan/tls_probe --pressure
 sudo python3 tools/run_local.py --uid "$(id -u)" --binary build/ubsan/tls_probe --connections
+sudo python3 tools/run_local.py --uid "$(id -u)" --binary build/ubsan/tls_probe --sessions
 ```
 
 Each run writes `probe.log`, `peer-events.json`, `source-manifest.json` and
@@ -113,6 +115,25 @@ releasing its semaphore. Each failure checks immediate socket release, safe
 destruction and restoration of netconn, TCP PCB and TCP segment pools. These
 short cases do not cover TCP retransmission exhaustion or network recovery races.
 
+The `--sessions` suite has 63 checks. Test adapters limit actual transport reads
+to 13 bytes and writes to 17 bytes, while callers exchange a 1025-byte binary
+payload in larger operations. Independent peers and clients compare exact bytes.
+Cancellation is exercised before open and at deterministic completion boundaries:
+another task cancels after a successful TCP open, read or write callback, before
+that callback returns to the TLS layer. Two verified sessions are then held open
+simultaneously; one is cancelled while the other completes its own distinct
+payload and authenticated closure. This proves the selected orderings and session
+isolation, not exhaustive race coverage or concurrent access to a single handle.
+
+Socket release does not imply immediate TCP PCB reclamation. The pinned lwIP
+implementation can close normally with zero linger when no outgoing data is
+pending. The session suite allows up to one second for local FIN processing,
+requires no remaining active connections or queued segments, and permits at most
+two TIME_WAIT PCBs belonging only to the successful binary sessions. With no live
+connections, it explicitly advances the TCP slow timer through two maximum segment
+lifetimes and verifies reclamation. This is a test of timer logic; it is not a
+wall-clock retention measurement, long soak or total heap leak check.
+
 Socket waits poll the atomic cancellation flag in slices of at most 10 ms. DNS
 submission to the TCP/IP task is nonblocking. Already submitted DNS queries can
 continue after the caller has returned; the fixed `DNS_TABLE_SIZE` slot pool
@@ -144,11 +165,12 @@ operator. The missing-time test exercises the explicit clock-unavailable path,
 not a simulated expired certificate. TLS 1.3 and custom end-user root provisioning
 are outside this first exercise.
 
-Known remaining work: cancellation boundary races; expired/future
+Known remaining work: broader cancellation/close-notify and deadline races; expired/future
 certificates; transport truncation; allocation failures; full socket/heap/queue
 accounting; concurrent sessions; performance budgets; a second port.
-The current destroy operation aborts TCP after releasing the stream and does not
-perform a potentially blocking bidirectional TLS shutdown.
+The current destroy operation releases the socket with zero linger and does not
+perform a potentially blocking bidirectional TLS shutdown. TCP closing/TIME_WAIT
+state may outlive that socket; platform resource budgets must include it.
 
 ## Source provenance
 

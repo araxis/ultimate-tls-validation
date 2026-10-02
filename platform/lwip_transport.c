@@ -95,7 +95,8 @@ static int open_socket(void *context, const char *host, uint16_t port, uint32_t 
     transport->socket_fd = lwip_socket(AF_INET, SOCK_STREAM, 0);
     int fd = transport->socket_fd;
     int result = -1;
-    /* Destroy is abortive and bounded, including partially connected sockets. */
+    /* Zero linger avoids waiting for unsent data. The stack may still retain
+     * normal TCP closing/TIME_WAIT state after releasing the socket. */
     struct linger abort_on_close = {1, 0};
     if (fd >= 0 && lwip_setsockopt(fd, SOL_SOCKET, SO_LINGER, &abort_on_close,
                                  sizeof(abort_on_close)) == 0 &&

@@ -15,6 +15,7 @@ import subprocess
 import threading
 import termios
 import time
+from session_peers import serve_sessions, session_accounting
 
 ROOT = Path(__file__).resolve().parents[1]
 ADDRESS = '192.0.2.1'
@@ -205,7 +206,11 @@ class Peers:
             finally:
                 connection.close()
 
-    def start(self, connections=False):
+    def start(self, connections=False, sessions=False):
+        if sessions:
+            for port in range(8450, 8456):
+                self.listen(socket.SOCK_STREAM, port,
+                            lambda listener, port: serve_sessions(self, listener, port), port)
         if connections:
             # Reserve both ports without listen(): the kernel refuses any SYN
             # that reaches these sockets. No other process can claim the ports.
@@ -239,6 +244,7 @@ def main():
     suites.add_argument('--faults', action='store_true')
     suites.add_argument('--pressure', action='store_true')
     suites.add_argument('--connections', action='store_true')
+    suites.add_argument('--sessions', action='store_true')
     args = parser.parse_args()
     directory = ROOT / 'evidence' / datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
     directory.mkdir(parents=True)
@@ -255,7 +261,7 @@ def main():
     start = time.monotonic()
     returncode, output, failure = None, '', None
     try:
-        peers.start(connections=args.connections)
+        peers.start(connections=args.connections, sessions=args.sessions)
         command = [str(args.binary.resolve()), 'ult-tls0', str(directory / 'trusted-ca.pem')]
         if args.faults:
             command.append('--faults')
@@ -263,6 +269,8 @@ def main():
             command.append('--pressure')
         if args.connections:
             command.append('--connections')
+        if args.sessions:
+            command.append('--sessions')
         completed = subprocess.run(command,
                                    text=True, capture_output=True, timeout=75)
         returncode = completed.returncode
@@ -323,11 +331,21 @@ def main():
                    and all(not event['listening'] for event in reserved)
                    and not any(event['kind'] == 'fixture-error' for event in peers.events))
         expected_checks = 42
+    if args.sessions:
+        complete = (attempts[:5] == ['cancel-before-open', 'cancel-after-open', 'cancel-after-write',
+                                    'cancel-after-read', 'short-transfer']
+                    and sorted(attempts[5:7]) == ['concurrent-cancel', 'concurrent-success']
+                    and attempts[7:] == ['sessions-recovery'])
+        peer_ok = (len(requests) == 1 and requests[0]['exact'] and requests[0]['server'] == 'trusted'
+                   and not alerts and sni == ['tls.lab.test'] * 6 and dns == {'tls.lab.test'}
+                   and session_accounting(peers.events)
+                   and not any(event['kind'] == 'fixture-error' for event in peers.events))
+        expected_checks = 63
     passed = (returncode == 0 and summary is not None and int(summary[1]) == expected_checks and int(summary[2]) == 0
               and all(int(summary[index]) > 0 for index in (3, 4, 5))
               and complete and peer_ok and failure is None)
     report = {'passed': passed, 'returncode': returncode, 'failure': failure,
-              'suite': 'connections' if args.connections else 'pressure' if args.pressure else 'wait-faults' if args.faults else 'baseline',
+              'suite': 'sessions' if args.sessions else 'connections' if args.connections else 'pressure' if args.pressure else 'wait-faults' if args.faults else 'baseline',
               'elapsed_seconds': time.monotonic() - start, 'peer_accounting_passed': peer_ok,
               'complete_attempts': complete,
               'checks': int(summary[1]) if summary else None,
