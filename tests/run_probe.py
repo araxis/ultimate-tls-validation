@@ -17,6 +17,7 @@ import termios
 import time
 from session_peers import serve_sessions, session_accounting
 from security_peers import make_dated_certificates, serve_closure
+from record_peer import serve_record_cut
 
 ROOT = Path(__file__).resolve().parents[1]
 ADDRESS = '192.0.2.1'
@@ -210,6 +211,9 @@ class Peers:
 
     def start(self, connections=False, sessions=False, security=False):
         if security:
+            for port, mode in ((8461, 'header'), (8462, 'body'), (8463, 'tag')):
+                self.listen(socket.SOCK_STREAM, port,
+                            lambda listener, mode: serve_record_cut(self, listener, mode), mode)
             self.listen(socket.SOCK_STREAM, 8456, self.tls, 'expired')
             self.listen(socket.SOCK_STREAM, 8457, self.tls, 'future')
             for port, mode in ((8458, 'handshake-eof'), (8459, 'unclean-eof'), (8460, 'reset')):
@@ -254,6 +258,7 @@ def main():
     suites.add_argument('--connections', action='store_true')
     suites.add_argument('--sessions', action='store_true')
     suites.add_argument('--security', action='store_true')
+    suites.add_argument('--allocations', action='store_true')
     args = parser.parse_args()
     directory = ROOT / 'evidence' / datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
     directory.mkdir(parents=True)
@@ -284,6 +289,8 @@ def main():
             command.append('--sessions')
         if args.security:
             command.append('--security')
+        if args.allocations:
+            command.append('--allocations')
         completed = subprocess.run(command,
                                    text=True, capture_output=True, timeout=75)
         returncode = completed.returncode
@@ -356,22 +363,37 @@ def main():
         expected_checks = 63
     if args.security:
         complete = attempts == ['expired-certificate', 'future-certificate', 'handshake-eof',
-                                'unclean-eof', 'peer-reset', 'security-recovery']
+                                'unclean-eof', 'peer-reset', 'record-header-cut', 'record-body-cut',
+                                'record-tag-cut', 'security-recovery']
         closures = [event for event in peers.events if event['kind'] == 'closure']
+        cuts = [event for event in peers.events if event['kind'] == 'record-cut']
         peer_ok = (len(requests) == 1 and requests[0]['exact'] and requests[0]['server'] == 'trusted'
                    and [event['server'] for event in alerts] == ['expired', 'future']
-                   and sni == ['tls.lab.test'] * 5 and dns == {'tls.lab.test'}
+                   and sni == ['tls.lab.test'] * 8 and dns == {'tls.lab.test'}
                    and [event['mode'] for event in closures] == ['handshake-eof', 'unclean-eof', 'reset']
                    and [event['sent'] for event in closures] == [0, 7, 0]
                    and [event['established'] for event in closures] == [False, True, True]
                    and all(event['exact'] for event in closures)
+                   and [event['mode'] for event in cuts] == ['header', 'body', 'tag']
+                   and all(event['record_bytes'] == 46 for event in cuts)
+                   and [event['sent'] for event in cuts] == [3, 17, 45]
                    and not any(event['kind'] == 'fixture-error' for event in peers.events))
-        expected_checks = 44
+        expected_checks = 71
+    if args.allocations:
+        allocation_summary = re.search(r'^ALLOCATIONS sites=(\d+)$', output, re.MULTILINE)
+        sites = int(allocation_summary[1]) if allocation_summary else 0
+        indexes = [int(index) for index in re.findall(r'^RESULT allocation-case index=(\d+) ', output, re.MULTILINE)]
+        complete = (0 < sites <= 128 and indexes == [0] + list(range(1, sites + 1)) + [0]
+                    and attempts == ['allocation-case'] * (sites + 2) + ['allocations-recovery'])
+        peer_ok = (len(requests) == 1 and requests[0]['exact'] and requests[0]['server'] == 'trusted'
+                   and not alerts and sni == ['tls.lab.test'] and dns == {'tls.lab.test'}
+                   and not any(event['kind'] == 'fixture-error' for event in peers.events))
+        expected_checks = 4 * (sites + 2) + 1 + 7
     passed = (returncode == 0 and summary is not None and int(summary[1]) == expected_checks and int(summary[2]) == 0
               and all(int(summary[index]) > 0 for index in (3, 4, 5))
               and complete and peer_ok and failure is None)
     report = {'passed': passed, 'returncode': returncode, 'failure': failure,
-              'suite': 'security' if args.security else 'sessions' if args.sessions else 'connections' if args.connections else 'pressure' if args.pressure else 'wait-faults' if args.faults else 'baseline',
+              'suite': 'allocations' if args.allocations else 'security' if args.security else 'sessions' if args.sessions else 'connections' if args.connections else 'pressure' if args.pressure else 'wait-faults' if args.faults else 'baseline',
               'elapsed_seconds': time.monotonic() - start, 'peer_accounting_passed': peer_ok,
               'complete_attempts': complete,
               'checks': int(summary[1]) if summary else None,

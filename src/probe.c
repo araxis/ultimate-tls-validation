@@ -5,6 +5,7 @@
 #include "connect.h"
 #include "sessions.h"
 #include "security.h"
+#include "allocations.h"
 #include "tap_network.h"
 #include "FreeRTOS.h"
 #include "task.h"
@@ -23,6 +24,7 @@ static bool pressure;
 static bool connections;
 static bool sessions;
 static bool security;
+static bool allocations;
 static const uint8_t request_bytes[] = "GET /probe HTTP/1.1\r\nHost: tls.lab.test\r\nConnection: close\r\n\r\n";
 
 static void check(bool passed, const char *label)
@@ -178,7 +180,12 @@ static void client_task(void *context)
     printf("FreeRTOS=%s lwIP=%s MbedTLS=%s\n", tskKERNEL_VERSION_NUMBER,
            LWIP_VERSION_STRING, MBEDTLS_VERSION_STRING);
     TickType_t start = xTaskGetTickCount();
-    if (security) {
+    if (allocations) {
+        struct allocation_results result = allocation_tests(ca_path);
+        checks += result.checks;
+        failures += result.failures;
+        exchange("allocations-recovery", "tls.lab.test", 8443, TLS_OK, 0, true, true);
+    } else if (security) {
         struct security_results result = security_tests(ca_path);
         checks += result.checks;
         failures += result.failures;
@@ -238,8 +245,8 @@ int main(int argc, char **argv)
     if (argc != 3 && !(argc == 4 &&
         (strcmp(argv[3], "--faults") == 0 || strcmp(argv[3], "--pressure") == 0 ||
          strcmp(argv[3], "--connections") == 0 || strcmp(argv[3], "--sessions") == 0 ||
-         strcmp(argv[3], "--security") == 0))) {
-        fprintf(stderr, "Usage: %s TAP_INTERFACE CA_FILE [--faults|--pressure|--connections|--sessions|--security]\n", argv[0]);
+         strcmp(argv[3], "--security") == 0 || strcmp(argv[3], "--allocations") == 0))) {
+        fprintf(stderr, "Usage: %s TAP_INTERFACE CA_FILE [--faults|--pressure|--connections|--sessions|--security|--allocations]\n", argv[0]);
         return 2;
     }
     ca_path = argv[2];
@@ -248,6 +255,7 @@ int main(int argc, char **argv)
     connections = argc == 4 && strcmp(argv[3], "--connections") == 0;
     sessions = argc == 4 && strcmp(argv[3], "--sessions") == 0;
     security = argc == 4 && strcmp(argv[3], "--security") == 0;
+    allocations = argc == 4 && strcmp(argv[3], "--allocations") == 0;
     if (tap_network_open(argv[1])) {
         perror("open private TAP interface");
         return 2;

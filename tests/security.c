@@ -79,5 +79,8 @@ struct security_results security_tests(const char *ca)
     closure(ca, "handshake-eof", 8458, TLS_ERROR, true, "");
     closure(ca, "unclean-eof", 8459, TLS_TRUNCATED, false, "partial");
     closure(ca, "peer-reset", 8460, TLS_TRANSPORT_ERROR, false, "");
+    closure(ca, "record-header-cut", 8461, TLS_TRUNCATED, false, "");
+    closure(ca, "record-body-cut", 8462, TLS_TRUNCATED, false, "");
+    closure(ca, "record-tag-cut", 8463, TLS_TRUNCATED, false, "");
     return results;
 }

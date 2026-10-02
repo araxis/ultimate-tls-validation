@@ -54,7 +54,7 @@ probes concurrently on this interface. Certificates and private test keys are
 created per run under ignored `evidence/`; they are never installation roots.
 The connection-fault suite also reserves TCP ports 8448 and 8449 without listening.
 The session suite uses binary TLS peers on ports 8450 through 8455.
-The certificate/closure suite uses ports 8456 through 8460.
+The certificate/closure suite uses ports 8456 through 8463.
 
 For undefined-behavior instrumentation of the executable and its dependencies:
 
@@ -67,6 +67,7 @@ sudo python3 tools/run_local.py --uid "$(id -u)" --binary build/ubsan/tls_probe 
 sudo python3 tools/run_local.py --uid "$(id -u)" --binary build/ubsan/tls_probe --connections
 sudo python3 tools/run_local.py --uid "$(id -u)" --binary build/ubsan/tls_probe --sessions
 sudo python3 tools/run_local.py --uid "$(id -u)" --binary build/ubsan/tls_probe --security
+sudo python3 tools/run_local.py --uid "$(id -u)" --binary build/ubsan/tls_probe --allocations
 ```
 
 Each run writes `probe.log`, `peer-events.json`, `source-manifest.json` and
@@ -136,7 +137,7 @@ connections, it explicitly advances the TCP slow timer through two maximum segme
 lifetimes and verifies reclamation. This is a test of timer logic; it is not a
 wall-clock retention measurement, long soak or total heap leak check.
 
-The `--security` suite has 44 checks. Two leaves use the trusted issuer, correct
+The `--security` suite has 71 checks. Two leaves use the trusted issuer, correct
 hostname and server-auth extensions but have expired or future validity dates.
 OpenSSL independently verifies their chain, hostname and purpose with date checks
 disabled, then confirms the expected date rejection with normal verification.
@@ -149,8 +150,30 @@ authenticated application record without TLS close_notify, and TCP reset after a
 verified handshake and client marker. The first must fail during handshake; the
 second returns only the authenticated prefix followed by TLS_TRUNCATED; the third
 returns TLS_TRANSPORT_ERROR. Each checks prompt failure, socket release and safe
-destruction, followed by a verified recovery exchange. This does not yet exercise
-EOF inside a TLS record, malformed records, allocation failures or full heap accounting.
+destruction, followed by a verified recovery exchange.
+
+Three additional peers use OpenSSL memory BIOs to construct real TLS 1.2
+AES-GCM application records after a verified handshake and client marker. They
+send only 3, 17 or 45 bytes of a 46-byte record, cutting the header, encrypted body
+or authentication tag respectively, then send TCP FIN without close_notify.
+Independent peer logs check the record and cut sizes. Each case must return
+TLS_TRUNCATED with zero application plaintext and release its socket. This tests
+selected cuts, not every offset or arbitrary malformed records.
+
+The `--allocations` suite sweeps each calloc attempt on the constructor, trust-file
+loading and TLS setup path before networking. GNU link wrappers inject a single
+failure at a time in the calling POSIX task only and track its allocations until
+destruction. They are disabled in other tasks and suites. The underlying allocator
+and dependency sources are unchanged. A test callback deliberately rejects TCP
+open so the baseline reaches the same pre-network boundary on every run.
+
+The pinned build currently has 15 allocation points and 76 checks, including a
+second uninjected setup and a real verified HTTPS recovery. Every injected failure
+must be reached, reject construction/setup, leave no socket and free all tracked
+allocations. This is not global heap instrumentation: malloc/realloc, shared-library
+internals, handshake-time allocations, lwIP pools and FreeRTOS heap exhaustion are
+outside this sweep. The reported peak is requested calloc payload on this host,
+not allocator overhead or an embedded RAM requirement.
 
 Socket waits poll the atomic cancellation flag in slices of at most 10 ms. DNS
 submission to the TCP/IP task is nonblocking. Already submitted DNS queries can
@@ -184,7 +207,7 @@ not a simulated expired certificate. TLS 1.3 and custom end-user root provisioni
 are outside this first exercise.
 
 Known remaining work: broader cancellation/close-notify and deadline races;
-mid-record transport truncation; allocation failures; full socket/heap/queue
+handshake/transport/kernel allocation failures; malformed records; full socket/heap/queue
 accounting; concurrent sessions; performance budgets; a second port.
 The current destroy operation releases the socket with zero linger and does not
 perform a potentially blocking bidirectional TLS shutdown. TCP closing/TIME_WAIT
