@@ -14,6 +14,7 @@ suite.add_argument('--faults', action='store_true')
 suite.add_argument('--pressure', action='store_true')
 suite.add_argument('--connections', action='store_true')
 suite.add_argument('--sessions', action='store_true')
+suite.add_argument('--security', action='store_true')
 args = parser.parse_args()
 if os.geteuid() != 0 or args.uid <= 0:
     raise SystemExit('Run setup as root and specify a non-root test user with --uid.')
@@ -32,6 +33,8 @@ try:
         command += ['--connections']
     if args.sessions:
         command += ['--sessions']
+    if args.security:
+        command += ['--security']
     result = subprocess.run(command, timeout=150)
 finally:
     subprocess.run([sys.executable, str(root / 'tools/tap.py'), 'remove'], check=True)

@@ -54,6 +54,7 @@ probes concurrently on this interface. Certificates and private test keys are
 created per run under ignored `evidence/`; they are never installation roots.
 The connection-fault suite also reserves TCP ports 8448 and 8449 without listening.
 The session suite uses binary TLS peers on ports 8450 through 8455.
+The certificate/closure suite uses ports 8456 through 8460.
 
 For undefined-behavior instrumentation of the executable and its dependencies:
 
@@ -65,6 +66,7 @@ sudo python3 tools/run_local.py --uid "$(id -u)" --binary build/ubsan/tls_probe 
 sudo python3 tools/run_local.py --uid "$(id -u)" --binary build/ubsan/tls_probe --pressure
 sudo python3 tools/run_local.py --uid "$(id -u)" --binary build/ubsan/tls_probe --connections
 sudo python3 tools/run_local.py --uid "$(id -u)" --binary build/ubsan/tls_probe --sessions
+sudo python3 tools/run_local.py --uid "$(id -u)" --binary build/ubsan/tls_probe --security
 ```
 
 Each run writes `probe.log`, `peer-events.json`, `source-manifest.json` and
@@ -134,6 +136,22 @@ connections, it explicitly advances the TCP slow timer through two maximum segme
 lifetimes and verifies reclamation. This is a test of timer logic; it is not a
 wall-clock retention measurement, long soak or total heap leak check.
 
+The `--security` suite has 44 checks. Two leaves use the trusted issuer, correct
+hostname and server-auth extensions but have expired or future validity dates.
+OpenSSL independently verifies their chain, hostname and purpose with date checks
+disabled, then confirms the expected date rejection with normal verification.
+The client itself always checks dates and must return exactly the corresponding
+Mbed TLS certificate flag. Per-run `date-fixtures.json` records actual dates,
+verification output and certificate hashes; the host clock is not modified.
+
+Three closure peers test EOF after a complete ClientHello, TCP FIN after a complete
+authenticated application record without TLS close_notify, and TCP reset after a
+verified handshake and client marker. The first must fail during handshake; the
+second returns only the authenticated prefix followed by TLS_TRUNCATED; the third
+returns TLS_TRANSPORT_ERROR. Each checks prompt failure, socket release and safe
+destruction, followed by a verified recovery exchange. This does not yet exercise
+EOF inside a TLS record, malformed records, allocation failures or full heap accounting.
+
 Socket waits poll the atomic cancellation flag in slices of at most 10 ms. DNS
 submission to the TCP/IP task is nonblocking. Already submitted DNS queries can
 continue after the caller has returned; the fixed `DNS_TABLE_SIZE` slot pool
@@ -165,8 +183,8 @@ operator. The missing-time test exercises the explicit clock-unavailable path,
 not a simulated expired certificate. TLS 1.3 and custom end-user root provisioning
 are outside this first exercise.
 
-Known remaining work: broader cancellation/close-notify and deadline races; expired/future
-certificates; transport truncation; allocation failures; full socket/heap/queue
+Known remaining work: broader cancellation/close-notify and deadline races;
+mid-record transport truncation; allocation failures; full socket/heap/queue
 accounting; concurrent sessions; performance budgets; a second port.
 The current destroy operation releases the socket with zero linger and does not
 perform a potentially blocking bidirectional TLS shutdown. TCP closing/TIME_WAIT
