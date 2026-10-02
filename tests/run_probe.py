@@ -1,15 +1,19 @@
 """Bounded local DNS/TLS fixtures with independent request and SNI accounting."""
 import argparse
+import array
 from datetime import datetime, timezone
+import fcntl
 import hashlib
 import json
 from pathlib import Path
 import re
+import select
 import socket
 import ssl
 import struct
 import subprocess
 import threading
+import termios
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -49,11 +53,13 @@ class Peers:
         with self.lock:
             self.events.append(event)
 
-    def listen(self, kind, port, target, *arguments):
+    def listen(self, kind, port, target, *arguments, receive_buffer=None):
         listener = socket.socket(socket.AF_INET, kind)
         self.sockets.append(listener)
         if kind == socket.SOCK_STREAM:
             listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if receive_buffer is not None:
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, receive_buffer)
         listener.bind((ADDRESS, port))
         listener.settimeout(0.2)
         if kind == socket.SOCK_STREAM:
@@ -87,7 +93,7 @@ class Peers:
                 end = offset + 5
                 query_type, query_class = struct.unpack('!HH', packet[offset + 1:end])
                 name = '.'.join(labels)
-                if name in ('silent.lab.test', 'cancel.lab.test'):
+                if name in ('silent.lab.test', 'cancel.lab.test') or re.fullmatch(r'pool-\d+\.lab\.test', name):
                     self.record(kind='dns-drop', name=name)
                     continue
                 accepted = name in ('tls.lab.test', 'wrong.lab.test', 'late.lab.test') and query_type == 1 and query_class == 1
@@ -165,12 +171,47 @@ class Peers:
             finally:
                 connection.close()
 
+    def write_stall(self, listener):
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.minimum_version = context.maximum_version = ssl.TLSVersion.TLSv1_2
+        context.set_ciphers('ECDHE-RSA-AES128-GCM-SHA256')
+        context.load_cert_chain(self.directory / 'trusted.pem', self.directory / 'trusted.key')
+        context.set_servername_callback(lambda stream, host, config: self.record(kind='sni', name=host, server='trusted'))
+        while not self.stop.is_set():
+            try:
+                connection, _ = listener.accept()
+            except socket.timeout:
+                continue
+            connection.settimeout(6)
+            try:
+                with context.wrap_socket(connection, server_side=True) as stream:
+                    stream.sendall(b'\x01')
+                    poller = select.poll()
+                    closed_flags = select.POLLERR | select.POLLHUP | select.POLLRDHUP
+                    poller.register(stream.fileno(), closed_flags)
+                    peak, closed = 0, False
+                    deadline = time.monotonic() + 6
+                    # Inspect unread ciphertext without consuming application data.
+                    while time.monotonic() < deadline:
+                        unread = array.array('i', [0])
+                        fcntl.ioctl(stream.fileno(), termios.FIONREAD, unread, True)
+                        peak = max(peak, unread[0])
+                        if any(flags & closed_flags for _, flags in poller.poll(10)):
+                            closed = True
+                            break
+                    self.record(kind='write-stall', queued_bytes_peak=peak, closed=closed)
+            except (OSError, ValueError) as error:
+                self.record(kind='fixture-error', error=str(error))
+            finally:
+                connection.close()
+
     def start(self):
         self.listen(socket.SOCK_DGRAM, 1053, self.dns)
         self.listen(socket.SOCK_STREAM, 8443, self.tls, 'trusted')
         self.listen(socket.SOCK_STREAM, 8444, self.tls, 'untrusted')
         self.listen(socket.SOCK_STREAM, 8445, self.handshake_stall)
         self.listen(socket.SOCK_STREAM, 8446, self.tls, 'trusted', True)
+        self.listen(socket.SOCK_STREAM, 8447, self.write_stall, receive_buffer=4096)
 
     def close(self):
         self.stop.set()
@@ -185,10 +226,19 @@ class Peers:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary', type=Path, default=ROOT / 'build/tls_probe')
-    parser.add_argument('--faults', action='store_true')
+    suites = parser.add_mutually_exclusive_group()
+    suites.add_argument('--faults', action='store_true')
+    suites.add_argument('--pressure', action='store_true')
     args = parser.parse_args()
     directory = ROOT / 'evidence' / datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
     directory.mkdir(parents=True)
+    source_files = [ROOT / name for name in ('CMakeLists.txt', 'dependencies.json', 'README.md', 'LICENSE.txt', '.gitignore')]
+    for name in ('src', 'include', 'platform', 'config', 'tests', 'tools'):
+        source_files.extend(path for path in (ROOT / name).rglob('*')
+                            if path.is_file() and '__pycache__' not in path.parts)
+    manifest = {str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
+                for path in sorted(source_files)}
+    (directory / 'source-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
     for name in ('trusted', 'untrusted'):
         make_certificate(directory, name)
     peers = Peers(directory)
@@ -199,6 +249,8 @@ def main():
         command = [str(args.binary.resolve()), 'ult-tls0', str(directory / 'trusted-ca.pem')]
         if args.faults:
             command.append('--faults')
+        if args.pressure:
+            command.append('--pressure')
         completed = subprocess.run(command,
                                    text=True, capture_output=True, timeout=75)
         returncode = completed.returncode
@@ -237,11 +289,24 @@ def main():
                    and any(event['kind'] == 'dns-late-reply' for event in peers.events)
                    and not any(event['kind'] == 'fixture-error' for event in peers.events))
         expected_checks = 40
+    if args.pressure:
+        complete = attempts == ['dns-pool-fill'] * 4 + ['dns-pool-full', 'dns-queue-full',
+                           'dns-queued-timeout', 'write-timeout', 'write-cancel', 'pressure-recovery']
+        dropped = {event['name'] for event in peers.events if event['kind'] == 'dns-drop'}
+        queried = {event['name'] for event in peers.events if event['kind'] in ('dns', 'dns-drop')}
+        pool_names = {f'pool-{index}.lab.test' for index in range(4)}
+        stalls = [event for event in peers.events if event['kind'] == 'write-stall']
+        peer_ok = (len(requests) == 1 and requests[0]['exact'] and requests[0]['server'] == 'trusted'
+                   and not alerts and sni == ['tls.lab.test'] * 3 and dns == {'tls.lab.test'}
+                   and dropped == pool_names and queried == pool_names | {'tls.lab.test'}
+                   and len(stalls) == 2 and all(event['queued_bytes_peak'] > 0 and event['closed'] for event in stalls)
+                   and not any(event['kind'] == 'fixture-error' for event in peers.events))
+        expected_checks = 61
     passed = (returncode == 0 and summary is not None and int(summary[1]) == expected_checks and int(summary[2]) == 0
               and all(int(summary[index]) > 0 for index in (3, 4, 5))
               and complete and peer_ok and failure is None)
     report = {'passed': passed, 'returncode': returncode, 'failure': failure,
-              'suite': 'wait-faults' if args.faults else 'baseline',
+              'suite': 'pressure' if args.pressure else 'wait-faults' if args.faults else 'baseline',
               'elapsed_seconds': time.monotonic() - start, 'peer_accounting_passed': peer_ok,
               'complete_attempts': complete,
               'checks': int(summary[1]) if summary else None,

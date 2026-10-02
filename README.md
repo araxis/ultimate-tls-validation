@@ -49,7 +49,7 @@ existing interface or overlap an existing non-default route. No forwarding,
 NAT, firewall changes, internet test endpoint or physical device is required.
 
 The private subnet is `192.0.2.0/30`: Linux is `.1`, lwIP is `.2`. The fixture
-uses DNS port 1053 and TLS ports 8443 through 8446, bound only to `.1`. Do not run multiple
+uses DNS port 1053 and TLS ports 8443 through 8447, bound only to `.1`. Do not run multiple
 probes concurrently on this interface. Certificates and private test keys are
 created per run under ignored `evidence/`; they are never installation roots.
 
@@ -60,10 +60,13 @@ cmake -S . -B build/ubsan -G Ninja -DCMAKE_BUILD_TYPE=Debug -DTLS_LAB_UBSAN=ON
 cmake --build build/ubsan -j 4
 sudo python3 tools/run_local.py --uid "$(id -u)" --binary build/ubsan/tls_probe
 sudo python3 tools/run_local.py --uid "$(id -u)" --binary build/ubsan/tls_probe --faults
+sudo python3 tools/run_local.py --uid "$(id -u)" --binary build/ubsan/tls_probe --pressure
 ```
 
-Each run writes `probe.log`, `peer-events.json` and `result.json` to a fresh
-evidence directory. Failure, timeout or incomplete accounting returns nonzero.
+Each run writes `probe.log`, `peer-events.json`, `source-manifest.json` and
+`result.json` to a fresh evidence directory. The manifest hashes the local source,
+configuration and harness files before execution; the result includes the binary
+hash and dependency pins. Failure, timeout or incomplete accounting returns nonzero.
 Eight cases produce 32 checks: valid trust, hostname rejection, recovery,
 unknown-root rejection, recovery, unavailable time, unavailable entropy, final
 recovery. Successful cases compare exact response bytes and require TLS
@@ -77,6 +80,24 @@ stalled-read timeout/cancellation and a verified recovery request. It checks the
 actual failure phase and independent peer events as well as status and elapsed
 time. Timing assertions allow 250 ms of host scheduling tolerance; that is not
 an extension of the requested deadline or a hard real-time guarantee.
+
+The separate `--pressure` suite has 61 checks with the pinned configuration:
+
+- Four abandoned DNS lookups fill the slot pool. A fifth fails promptly; the
+  original slots remain owned until their callbacks complete, then all retire.
+- A bounded test callback holds the TCP/IP task while 32 entries fill its actual
+  mailbox. Another DNS submission fails promptly and releases its message and
+  lookup slot. A second case expires a queued lookup before the core can run it;
+  the independent DNS peer verifies that this abandoned query is never sent.
+- A verified TLS peer stops reading after sending a readiness byte. A second
+  FreeRTOS task observes a non-writable lwIP socket before issuing cancellation.
+  Timeout and cancellation are checked independently, with socket, netconn and
+  TCP PCB release, followed by a verified recovery exchange. The peer separately
+  records unread ciphertext and connection closure.
+
+These are bounded functional checks on the reference port. Callback-message,
+netconn and TCP PCB pool restoration does not establish whole-process or TLS
+heap leak freedom. The core gate and write observer live only in the test driver.
 
 Socket waits poll the atomic cancellation flag in slices of at most 10 ms. DNS
 submission to the TCP/IP task is nonblocking. Already submitted DNS queries can
@@ -109,8 +130,8 @@ operator. The missing-time test exercises the explicit clock-unavailable path,
 not a simulated expired certificate. TLS 1.3 and custom end-user root provisioning
 are outside this first exercise.
 
-Known remaining work: full DNS-pool and core-queue saturation tests; connect and
-write-backpressure cancellation; cancellation boundary races; expired/future
+Known remaining work: connect refusal/stall/cancellation; cancellation boundary
+races; expired/future
 certificates; transport truncation; allocation failures; full socket/heap/queue
 accounting; concurrent sessions; performance budgets; a second port.
 The current destroy operation aborts TCP after releasing the stream and does not
