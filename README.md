@@ -608,7 +608,10 @@ task-driven cancellation, terminal I/O refusal and fresh-stream recovery. A
 cancellation, with a fresh authenticated recovery after each failure. It separates
 local socket release from remote closure: a zero-window peer can ignore the
 initial abort reset, so the fixture records that outcome and checks closure with
-a later peer probe. This remains partial second-port evidence: DNS, broader races,
+a later peer probe. A 154-check DNS profile reuses the bounded resolver, verifies
+late-callback ownership and four-slot exhaustion/reuse, preserves hostname
+authentication, and checks that resolution consumes the overall handshake budget.
+This remains partial second-port evidence: broader DNS cases and races,
 certificate/failure cases, target resource budgets and physical hardware
 qualification remain open.
 

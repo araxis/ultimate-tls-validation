@@ -1,8 +1,18 @@
 #include "lwip_dns.h"
 #include "lwip/dns.h"
 #include "lwip/tcpip.h"
+#ifdef ESP_PLATFORM
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+static portMUX_TYPE lookup_lock = portMUX_INITIALIZER_UNLOCKED;
+#define LOCK_LOOKUPS() taskENTER_CRITICAL(&lookup_lock)
+#define UNLOCK_LOOKUPS() taskEXIT_CRITICAL(&lookup_lock)
+#else
 #include "FreeRTOS.h"
 #include "task.h"
+#define LOCK_LOOKUPS() taskENTER_CRITICAL()
+#define UNLOCK_LOOKUPS() taskEXIT_CRITICAL()
+#endif
 #include <stdbool.h>
 #include <string.h>
 
@@ -22,11 +32,11 @@ static struct lookup lookups[DNS_TABLE_SIZE];
 unsigned lwip_dns_pending(void)
 {
     unsigned count = 0;
-    taskENTER_CRITICAL();
+    LOCK_LOOKUPS();
     for (unsigned i = 0; i < DNS_TABLE_SIZE; ++i) {
         if (lookups[i].references) ++count;
     }
-    taskEXIT_CRITICAL();
+    UNLOCK_LOOKUPS();
     return count;
 }
 
@@ -34,27 +44,28 @@ static void complete_lookup(const char *host, const ip_addr_t *address, void *co
 {
     struct lookup *lookup = context;
     (void)host;
-    taskENTER_CRITICAL();
+    LOCK_LOOKUPS();
     configASSERT(lookup->references > 0 && !lookup->complete);
     lookup->resolved = address != NULL;
     if (address) lookup->address = *address;
     lookup->complete = true;
     --lookup->references;
-    taskEXIT_CRITICAL();
+    UNLOCK_LOOKUPS();
 }
 
 static void start_lookup(void *context)
 {
     struct lookup *lookup = context;
-    taskENTER_CRITICAL();
+    LOCK_LOOKUPS();
     bool abandoned = lookup->abandoned;
-    taskEXIT_CRITICAL();
+    UNLOCK_LOOKUPS();
     if (abandoned) {
         complete_lookup(NULL, NULL, lookup);
         return;
     }
     ip_addr_t address;
-    err_t result = dns_gethostbyname(lookup->host, &address, complete_lookup, lookup);
+    err_t result = dns_gethostbyname_addrtype(lookup->host, &address, complete_lookup, lookup,
+                                             LWIP_DNS_ADDRTYPE_IPV4);
     if (result != ERR_INPROGRESS) {
         complete_lookup(NULL, result == ERR_OK ? &address : NULL, lookup);
     }
@@ -67,7 +78,7 @@ int lwip_dns_resolve(const char *host, ip_addr_t *address,
     size_t length = strnlen(host, sizeof(lookups[0].host));
     if (!length || length >= sizeof(lookups[0].host)) return -1;
     struct lookup *lookup = NULL;
-    taskENTER_CRITICAL();
+    LOCK_LOOKUPS();
     for (unsigned i = 0; i < DNS_TABLE_SIZE; ++i) {
         if (!lookups[i].references) {
             lookup = &lookups[i];
@@ -77,20 +88,20 @@ int lwip_dns_resolve(const char *host, ip_addr_t *address,
             break;
         }
     }
-    taskEXIT_CRITICAL();
+    UNLOCK_LOOKUPS();
     if (!lookup) return -1;
 
     /* Nonblocking submission: a full core queue cannot extend the deadline. */
     if (tcpip_try_callback(start_lookup, lookup) != ERR_OK) {
-        taskENTER_CRITICAL();
+        LOCK_LOOKUPS();
         lookup->references = 0;
-        taskEXIT_CRITICAL();
+        UNLOCK_LOOKUPS();
         return -1;
     }
     int result = -1;
     for (;;) {
         uint32_t left = remaining_ms(context);
-        taskENTER_CRITICAL();
+        LOCK_LOOKUPS();
         if (lookup->complete || !left) {
             if (left && lookup->complete && lookup->resolved) {
                 *address = lookup->address;
@@ -99,10 +110,11 @@ int lwip_dns_resolve(const char *host, ip_addr_t *address,
             lookup->abandoned = !lookup->complete;
             configASSERT(lookup->references > 0);
             --lookup->references;
-            taskEXIT_CRITICAL();
+            UNLOCK_LOOKUPS();
             return result;
         }
-        taskEXIT_CRITICAL();
-        vTaskDelay(pdMS_TO_TICKS(left < 10 ? left : 10));
+        UNLOCK_LOOKUPS();
+        TickType_t ticks = pdMS_TO_TICKS(left < 10 ? left : 10);
+        vTaskDelay(ticks ? ticks : 1);
     }
 }

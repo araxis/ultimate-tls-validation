@@ -5,7 +5,7 @@
 #include <stdatomic.h>
 
 /* Test-port context, owned by the calling task and destroyed after the stream.
- * Initial feasibility accepts IPv4 literals only; no DNS coverage is claimed. */
+ * IPv4 literals or bounded asynchronous IPv4 DNS; no IPv6 transport. */
 typedef struct {
     int socket_fd;
     unsigned open_calls;

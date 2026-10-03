@@ -1,4 +1,5 @@
 #include "transport.h"
+#include "lwip_dns.h"
 #include "esp_random.h"
 #include "esp_timer.h"
 #include "lwip/sockets.h"
@@ -53,15 +54,30 @@ static bool wait_socket(idf_transport *transport, bool write, int64_t deadline)
     return false;
 }
 
+typedef struct { idf_transport *transport; int64_t deadline; } open_budget;
+
+static uint32_t remaining_ms(void *argument)
+{
+    open_budget *budget = argument;
+    int64_t left = budget->deadline - now_ms(NULL);
+    return cancelled(budget->transport) || left <= 0 ? 0 : (uint32_t)left;
+}
+
 static int open_socket(void *context, const char *host, uint16_t port, uint32_t budget)
 {
     idf_transport *transport = context;
     ++transport->open_calls;
     int64_t deadline = now_ms(NULL) + budget;
+    open_budget operation = {transport, deadline};
+    ip_addr_t resolved;
+    if (!remaining_ms(&operation)) return -1;
+    /* Literals need no resolver slot, including when the DNS pool is full. */
+    if (!ipaddr_aton(host, &resolved) && lwip_dns_resolve(host, &resolved, remaining_ms, &operation)) return -1;
+    if (!IP_IS_V4(&resolved) || !remaining_ms(&operation)) return -1;
     struct sockaddr_in address = {0};
     address.sin_family = AF_INET;
     address.sin_port = htons(port);
-    if (lwip_inet_pton(AF_INET, host, &address.sin_addr) != 1 || cancelled(context)) return -1;
+    address.sin_addr.s_addr = ip4_addr_get_u32(ip_2_ip4(&resolved));
     transport->socket_fd = lwip_socket(AF_INET, SOCK_STREAM, 0);
     int fd = transport->socket_fd;
     struct linger abort_on_close = {1, 0};

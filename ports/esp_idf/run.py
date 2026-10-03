@@ -18,6 +18,7 @@ from run_probe import Peers
 from authentication import CHECKS, account
 from timing import CHECKS as TIMING_CHECKS, account as timing_account
 from socket_waits import CHECKS as SOCKET_CHECKS, account as socket_account
+from dns_waits import CHECKS as DNS_CHECKS, account as dns_account, serve as dns_serve
 
 
 def probe(args):
@@ -33,6 +34,7 @@ def probe(args):
     authentication = build.get('suite') == 'authentication'
     timing = build.get('suite') == 'timing'
     socket_waits = build.get('suite') == 'socket-waits'
+    dns_waits = build.get('suite') == 'dns-waits'
     ecdsa = build.get('profile') == 'ecdsa'
     peers = Peers(directory, ecdsa=ecdsa)
     command = [str(args.qemu.resolve()), '-machine', 'esp32s3', '-display', 'none',
@@ -54,6 +56,9 @@ def probe(args):
             peers.listen(socket.SOCK_STREAM, 8447, peers.tls, 'trusted', True)
         if socket_waits:
             peers.listen(socket.SOCK_STREAM, 8450, peers.write_stall, True, receive_buffer=4096)
+        if dns_waits:
+            peers.listen(socket.SOCK_DGRAM, 1053, lambda listener: dns_serve(peers, listener))
+            peers.listen(socket.SOCK_STREAM, 8446, peers.handshake_stall)
         # Keep input open: EOF disconnects QEMU's stdio character backend.
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.PIPE)
         # Read bytes instead of blocking readline, retaining partial panic output.
@@ -108,9 +113,11 @@ def probe(args):
         accounting = timing_account(text, peers.events)
     if socket_waits:
         accounting = socket_account(text, peers.events)
-    if authentication or timing or socket_waits:
+    if dns_waits:
+        accounting = dns_account(text, peers.events)
+    if authentication or timing or socket_waits or dns_waits:
         peer_ok = accounting['peer_accounting_passed']
-    expected_checks = SOCKET_CHECKS if socket_waits else TIMING_CHECKS if timing else (CHECKS if authentication else 10)
+    expected_checks = DNS_CHECKS if dns_waits else SOCKET_CHECKS if socket_waits else TIMING_CHECKS if timing else (CHECKS if authentication else 10)
     passed = (failure is None and completed and len(summaries) == 1 and summaries[0][:2] == (str(expected_checks), '0')
               and int(summaries[0][2]) > 0 and summaries[0][3] == directory.name
               and len(re.findall(r'^PASS ', text, re.M)) == expected_checks
@@ -121,11 +128,12 @@ def probe(args):
               'authentication': accounting if authentication else {},
               'timing': accounting if timing else {},
               'socket_waits': accounting if socket_waits else {},
+              'dns_waits': accounting if dns_waits else {},
               'peer_accounting_passed': peer_ok, 'checks': int(summaries[0][0]) if len(summaries) == 1 else None,
               'elapsed_seconds': time.monotonic() - start, 'command': command,
               'qemu_sha256': hashlib.sha256(args.qemu.read_bytes()).hexdigest(),
               'image_sha256': hashlib.sha256((directory / 'flash.bin').read_bytes()).hexdigest(),
-              'scope': 'Finite IP-literal cases under ESP32-S3 emulation; no DNS, exhaustive races, target accounting or hardware qualification'}
+              'scope': 'Finite selected cases under ESP32-S3 emulation; no exhaustive races, target accounting or hardware qualification'}
     (directory / 'result.json').write_text(json.dumps(report, indent=2) + '\n')
     print(text)
     print(json.dumps(report, indent=2))

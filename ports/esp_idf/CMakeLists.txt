@@ -5,3 +5,6 @@ endif()
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 set(COMPONENTS main)
 project(tls_port_probe)
+# Private test DNS peer runs without privileged-port access, as on the host port.
+idf_component_get_property(lwip_library lwip COMPONENT_LIB)
+target_compile_definitions(${lwip_library} PRIVATE DNS_SERVER_PORT=1053)

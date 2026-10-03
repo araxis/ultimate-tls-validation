@@ -22,7 +22,7 @@ static int fail_entropy(void *context, unsigned char *bytes, size_t length)
     return -1;
 }
 
-static void run_case(const authentication_case *test, bool ready,
+static void run_case(const authentication_case *test, const char *host, bool ready,
                      void (*check)(bool, const char *))
 {
     printf("ATTEMPT %s\n", test->label);
@@ -35,7 +35,7 @@ static void run_case(const authentication_case *test, bool ready,
     tls_stream *stream = tls_stream_create(&port);
     check(stream != NULL, "stream allocated");
     tls_status status = TLS_INVALID_ARGUMENT;
-    if (ready && !loaded && stream) status = tls_stream_open(stream, "192.0.2.1", test->port, 15000);
+    if (ready && !loaded && stream) status = tls_stream_open(stream, host, test->port, 15000);
     tls_stream_diagnostics diagnostic = tls_stream_diagnostic(stream);
     check(status == test->status && diagnostic.status == test->status &&
           diagnostic.stage == test->stage && diagnostic.code == test->code &&
@@ -92,7 +92,13 @@ static void run_case(const authentication_case *test, bool ready,
 void authentication_recovery(const char *label, bool ready, void (*check)(bool, const char *))
 {
     const authentication_case test = {label, 8443, TLS_OK, TLS_STAGE_HANDSHAKE, 0, 0};
-    run_case(&test, ready, check);
+    run_case(&test, "192.0.2.1", ready, check);
+}
+
+void authentication_hostname(const char *label, bool ready, void (*check)(bool, const char *))
+{
+    const authentication_case test = {label, 8443, TLS_OK, TLS_STAGE_HANDSHAKE, 0, 0};
+    run_case(&test, "tls.lab.test", ready, check);
 }
 
 void authentication_probe(bool ready, void (*check)(bool, const char *))
@@ -112,5 +118,5 @@ void authentication_probe(bool ready, void (*check)(bool, const char *))
         {"recovery-after-entropy", 8443, TLS_OK, TLS_STAGE_HANDSHAKE, 0, 0}
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i)
-        run_case(&cases[i], ready, check);
+        run_case(&cases[i], "192.0.2.1", ready, check);
 }

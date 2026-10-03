@@ -1,13 +1,15 @@
 # ESP32-S3 emulator probe
 
 A separate ESP-IDF application compiles the same `src/tls_stream.c` and public
-header as the host reference. Its small test adapter accepts IPv4 literals only.
+header as the host reference. Its small test adapter accepts IPv4 literals and
+hostnames through the shared bounded asynchronous DNS resolver.
 The default smoke test exercises one verified RSA exchange, exact request/response
 bytes, authenticated EOF, socket cleanup and advancing FreeRTOS ticks. Optional
 RSA and P-256 ECDSA profiles test authentication rejection and recovery. These
-tests do not qualify DNS, wider concurrency, Wi-Fi or physical hardware. A separate
+tests do not qualify wider concurrency, Wi-Fi or physical hardware. A separate
 timing profile covers selected handshake/read deadlines and cancellation.
 A socket-wait profile adds connect refusal, connect waits and blocked writes.
+A DNS profile exercises lookup lifetime, cancellation, capacity and recovery.
 
 The peer is the existing Python TLS fixture on a private TAP subnet. Certificates
 are generated per build with an IP subject alternative name and independently
@@ -152,11 +154,52 @@ fixture verifies post-deadline cleanup explicitly. No dependency is patched to
 alter reset behavior. DNS, exhaustive races, ECDSA timing, repeated resource
 retention and target stack/heap budgets remain separate work.
 
+## DNS ownership and shared deadlines
+
+Add `--dns-waits` to preparation for a separate 154-check RSA profile. The guest
+uses the private peer as its only configured DNS server. Like the host reference,
+the test application compiles lwIP with `DNS_SERVER_PORT=1053`, allowing the peer
+to run unprivileged. This fixture setting does not change any installed firmware.
+
+`platform/lwip_dns.c` is compiled directly into both ports. Its four-slot pool
+owns copied names and results until the waiting task and eventual callback have
+both released their references. Cancellation or timeout releases the caller's
+reference without handing caller buffers to a late callback. ESP-IDF uses a
+shared critical-section spinlock across cores; the host retains its existing
+critical sections. Both request IPv4 explicitly. Polling waits at least one RTOS
+tick instead of repeatedly yielding when less than one tick remains.
+
+The adapter bypasses this pool for IP literals and shares one deadline across
+DNS and TCP connect; the TLS stream retains its overall operation deadline.
+Resolving an address does not replace the hostname used for certificate checks.
+The profile verifies:
+
+- A hostname exchange, negative DNS response and wrong certificate identity.
+- A 100 ms DNS deadline and cancellation from a second task, followed by replies
+  delayed by 600 ms. Caller contexts are destroyed before the callback drains.
+- A 600 ms DNS delay followed by a stalled handshake, with total completion in
+  1000–1250 ms. Resetting the budget after resolution would fail this check.
+- Four 60 ms abandoned lookups retaining exactly four slots until delayed replies
+  arrive, prompt rejection of a fifth lookup, and an authenticated IP-literal
+  connection while those slots remain occupied.
+- Draining late callbacks back to zero slots and fresh hostname recovery.
+
+The independent peer checks IPv4 queries, bounded retry counts, expected replies,
+server names, a certificate alert, a handshake stall and eight exact exchanges.
+There must be no query for the rejected fifth lookup. Guest diagnostics, retained
+slot counts, ordered attempts and final cleanup must all agree. Scheduling
+tolerances describe emulator acceptance, not physical latency guarantees.
+
+This is selected DNS lifetime coverage. CNAME chains, IPv6, server failover,
+malformed replies, simultaneous callers, all resolver/core-queue races and natural
+retry exhaustion are not newly qualified on ESP-IDF. A retained slot is bounded
+state, not proof that all DNS/kernel allocations have been measured or freed.
+
 ## Boundaries
 
 The adapter has nonblocking lwIP socket operations with a bounded wait budget.
-Cancellation is tested in selected connect, handshake, read and write cases. DNS ownership
-and target-specific locking must be validated separately.
+Cancellation is tested in selected DNS, connect, handshake, read and write cases.
+Wider concurrency and target resource accounting remain separate validation.
 The app uses IDF's own kernel and network configuration, not the host simulator's
 headers. Its 12 KiB main-task allocation is a test setting, not a proven minimum
 stack size. No total heap, leak-freedom, hardware timing or device headroom claim

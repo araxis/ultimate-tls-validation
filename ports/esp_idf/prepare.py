@@ -28,6 +28,7 @@ def main():
                         help='Build rejection/recovery cases for this certificate profile')
     suite.add_argument('--timing', action='store_true', help='Build handshake/read deadline and cancellation cases')
     suite.add_argument('--socket-waits', action='store_true', help='Build connection and backpressure cases')
+    suite.add_argument('--dns-waits', action='store_true', help='Build bounded DNS ownership cases')
     args = parser.parse_args()
     if os.geteuid() == 0:
         parser.error('Build as a normal user; only run.py performs privileged TAP setup.')
@@ -36,7 +37,7 @@ def main():
     env = os.environ.copy()
     env.update(IDF_PATH=str(args.sdk.resolve()), IDF_TOOLS_PATH=str(args.tools.resolve()))
     report = {'prepared': False, 'commands': [], 'fixture': str(directory),
-              'suite': 'socket-waits' if args.socket_waits else 'timing' if args.timing else ('authentication' if args.authentication else 'smoke'),
+              'suite': 'dns-waits' if args.dns_waits else 'socket-waits' if args.socket_waits else 'timing' if args.timing else ('authentication' if args.authentication else 'smoke'),
               'profile': args.authentication or 'rsa'}
 
     def run(command, cwd=ROOT, timeout=600):
@@ -80,6 +81,7 @@ def main():
             '#define LAB_UTC_SECONDS ' + str(utc) + 'LL\n' +
             ('#define LAB_TIMING 1\n' if args.timing else '') +
             ('#define LAB_SOCKET_WAITS 1\n' if args.socket_waits else '') +
+            ('#define LAB_DNS_WAITS 1\n' if args.dns_waits else '') +
             ('#define LAB_AUTHENTICATION 1\n#define LAB_ECDSA ' + str(int(args.authentication == 'ecdsa')) + '\n'
              if args.authentication else '') +
             'static const unsigned char lab_root[] = ' + json.dumps(root) + ';\n')
