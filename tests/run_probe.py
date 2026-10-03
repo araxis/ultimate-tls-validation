@@ -25,22 +25,25 @@ from boundary_peer import MODES as BOUNDARY_MODES, serve_boundary, boundary_acco
 from throughput_peer import serve_throughput, throughput_accounting
 from memory_peer import serve_memory, memory_accounting
 from chain_peers import make_chains, serve_chain, chain_accounting
+from ecdsa_profile import verify_certificates, ecdsa_allocation_accounting
 
 ROOT = Path(__file__).resolve().parents[1]
 ADDRESS = '192.0.2.1'
 REQUEST = b'GET /probe HTTP/1.1\r\nHost: tls.lab.test\r\nConnection: close\r\n\r\n'
 RESPONSE = b'HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nlwip-ok\n'
+ECDSA_RESPONSE = b'HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\n\x00\xff\x80\r\nA\x00\n'
 
 
-def make_certificate(directory, name):
+def make_certificate(directory, name, ecdsa=False):
     def openssl(*arguments):
         subprocess.run(['openssl', *arguments], cwd=directory, check=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=30)
-    openssl('req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '2',
+    key = ('-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256') if ecdsa else ('-newkey', 'rsa:2048')
+    openssl('req', '-x509', *key, '-nodes', '-days', '2',
             '-subj', f'/CN={name} test root', '-keyout', f'{name}-ca.key',
             '-out', f'{name}-ca.pem', '-addext', 'basicConstraints=critical,CA:TRUE',
             '-addext', 'keyUsage=critical,keyCertSign,cRLSign')
-    openssl('req', '-new', '-newkey', 'rsa:2048', '-nodes', '-subj', '/CN=tls.lab.test',
+    openssl('req', '-new', *key, '-nodes', '-subj', '/CN=tls.lab.test',
             '-keyout', f'{name}.key', '-out', f'{name}.csr')
     extension = directory / f'{name}.ext'
     extension.write_text('subjectAltName=DNS:tls.lab.test\nbasicConstraints=critical,CA:FALSE\n'
@@ -51,8 +54,10 @@ def make_certificate(directory, name):
 
 
 class Peers:
-    def __init__(self, directory):
+    def __init__(self, directory, ecdsa=False):
         self.directory = directory
+        self.cipher = 'ECDHE-ECDSA-AES128-GCM-SHA256' if ecdsa else 'ECDHE-RSA-AES128-GCM-SHA256'
+        self.response = ECDSA_RESPONSE if ecdsa else RESPONSE
         self.stop = threading.Event()
         self.events = []
         self.lock = threading.Lock()
@@ -138,7 +143,7 @@ class Peers:
     def tls(self, listener, name, stall=False):
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.minimum_version = context.maximum_version = ssl.TLSVersion.TLSv1_2
-        context.set_ciphers('ECDHE-RSA-AES128-GCM-SHA256')
+        context.set_ciphers(self.cipher)
         key_name = 'trusted' if name in ('expired', 'future') else name
         context.load_cert_chain(self.directory / f'{name}.pem', self.directory / f'{key_name}.key')
         context.set_servername_callback(lambda stream, host, config: self.record(kind='sni', name=host, server=name))
@@ -168,8 +173,8 @@ class Peers:
                             pass
                         continue
                     # Several TLS records exercise stream assembly.
-                    for offset in range(0, len(RESPONSE), 7):
-                        stream.sendall(RESPONSE[offset:offset + 7])
+                    for offset in range(0, len(self.response), 7):
+                        stream.sendall(self.response[offset:offset + 7])
                     try:
                         stream.unwrap().close()
                     except (ssl.SSLEOFError, ConnectionResetError):
@@ -294,6 +299,7 @@ def main():
     suites.add_argument('--memory', action='store_true')
     suites.add_argument('--exhaustion', action='store_true')
     suites.add_argument('--chains', action='store_true')
+    suites.add_argument('--ecdsa', action='store_true')
     args = parser.parse_args()
     directory = ROOT / 'evidence' / datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
     directory.mkdir(parents=True)
@@ -305,12 +311,14 @@ def main():
                 for path in sorted(source_files)}
     (directory / 'source-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
     for name in ('trusted', 'untrusted'):
-        make_certificate(directory, name)
+        make_certificate(directory, name, ecdsa=args.ecdsa)
+    if args.ecdsa:
+        verify_certificates(directory)
     if args.security:
         make_dated_certificates(directory)
     if args.chains:
         make_chains(directory)
-    peers = Peers(directory)
+    peers = Peers(directory, ecdsa=args.ecdsa)
     start = time.monotonic()
     returncode, output, failure = None, '', None
     try:
@@ -344,6 +352,8 @@ def main():
             command.append('--exhaustion')
         if args.chains:
             command.append('--chains')
+        if args.ecdsa:
+            command.append('--ecdsa')
         completed = subprocess.run(command,
                                    text=True, capture_output=True, timeout=210 if args.memory else 75)
         returncode = completed.returncode
@@ -370,6 +380,13 @@ def main():
                and dns == {'tls.lab.test', 'wrong.lab.test'}
                and not any(event['kind'] == 'fixture-error' for event in peers.events))
     expected_checks = 32
+    if args.ecdsa:
+        complete = complete and ecdsa_allocation_accounting(output, attempts)
+        peer_ok = (peer_ok and all(event['protocol'] == 'TLSv1.2' and
+                                  event['cipher'] == 'ECDHE-ECDSA-AES128-GCM-SHA256' for event in requests)
+                   and [(event['server'], event['reason']) for event in alerts] ==
+                   [('trusted', 'SSLV3_ALERT_BAD_CERTIFICATE'), ('untrusted', 'TLSV1_ALERT_UNKNOWN_CA')])
+        expected_checks = 54
     if args.faults:
         complete = attempts == ['dns-timeout', 'dns-cancel', 'dns-late-reply', 'handshake-timeout',
                                 'handshake-cancel', 'read-timeout', 'read-cancel', 'dns-recovery']
@@ -514,7 +531,7 @@ def main():
               and complete and peer_ok and failure is None)
     report = {'passed': passed, 'returncode': returncode, 'failure': failure,
               'allocator_tunables': os.environ.get('GLIBC_TUNABLES'),
-              'suite': 'chains' if args.chains else 'exhaustion' if args.exhaustion else 'memory' if args.memory else 'throughput' if args.throughput else 'boundaries' if args.boundaries else 'records' if args.records else 'handshake-allocations' if args.handshake_allocations else 'allocations' if args.allocations else 'security' if args.security else 'sessions' if args.sessions else 'connections' if args.connections else 'pressure' if args.pressure else 'wait-faults' if args.faults else 'baseline',
+              'suite': 'ecdsa' if args.ecdsa else 'chains' if args.chains else 'exhaustion' if args.exhaustion else 'memory' if args.memory else 'throughput' if args.throughput else 'boundaries' if args.boundaries else 'records' if args.records else 'handshake-allocations' if args.handshake_allocations else 'allocations' if args.allocations else 'security' if args.security else 'sessions' if args.sessions else 'connections' if args.connections else 'pressure' if args.pressure else 'wait-faults' if args.faults else 'baseline',
               'elapsed_seconds': time.monotonic() - start, 'peer_accounting_passed': peer_ok,
               'complete_attempts': complete,
               'checks': int(summary[1]) if summary else None,

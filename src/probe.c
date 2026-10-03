@@ -38,6 +38,7 @@ static bool throughput;
 static bool memory;
 static bool exhaustion;
 static bool chains;
+static bool ecdsa;
 static const uint8_t request_bytes[] = "GET /probe HTTP/1.1\r\nHost: tls.lab.test\r\nConnection: close\r\n\r\n";
 
 static void check(bool passed, const char *label)
@@ -51,11 +52,13 @@ static void exchange(const char *label, const char *host, uint16_t port,
                      tls_status expected, uint32_t expected_flags,
                      bool clock_ready, bool entropy_ready)
 {
+    if (ecdsa) allocation_measure_begin();
     lwip_transport transport;
     int result = lwip_transport_init(&transport, ca_path);
     if (result) {
         check(false, "load trust anchor");
         lwip_transport_destroy(&transport);
+        if (ecdsa) (void)allocation_measure_end();
         return;
     }
     transport.clock_ready = clock_ready;
@@ -65,15 +68,29 @@ static void exchange(const char *label, const char *host, uint16_t port,
     if (!stream) {
         check(false, "allocate stream");
         lwip_transport_destroy(&transport);
+        if (ecdsa) (void)allocation_measure_end();
         return;
     }
     int64_t start = callbacks.now_ms(&transport);
     tls_status status = tls_stream_open(stream, host, port, 5000);
     tls_stream_diagnostics diagnostic = tls_stream_diagnostic(stream);
+    struct allocation_measurement opened = {0};
+    if (ecdsa) opened = allocation_measure_read();
     check(status == expected, label);
     if (expected_flags) check((diagnostic.verify_flags & expected_flags) != 0, "certificate rejection reason");
+    if (ecdsa && expected_flags) {
+        check(diagnostic.stage == TLS_STAGE_HANDSHAKE && diagnostic.verify_flags == expected_flags,
+              "exact ECDSA handshake rejection");
+        uint8_t sentinel = 0x5a;
+        check(tls_stream_read(stream, &sentinel, 1) < 0 && sentinel == 0x5a,
+              "rejected ECDSA connection exposes no data");
+        check(transport.socket_fd == -1, "ECDSA rejection releases transport immediately");
+    }
     if (status == TLS_OK) {
         static const uint8_t expected_response[] = "HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nlwip-ok\n";
+        static const uint8_t binary_response[] = "HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\n\x00\xff\x80\r\nA\x00\n";
+        const uint8_t *expected_bytes = ecdsa ? binary_response : expected_response;
+        size_t expected_size = ecdsa ? sizeof(binary_response) - 1 : sizeof(expected_response) - 1;
         size_t sent = 0, received = 0;
         while (sent < sizeof(request_bytes) - 1) {
             int count = tls_stream_write(stream, request_bytes + sent, sizeof(request_bytes) - 1 - sent);
@@ -87,8 +104,8 @@ static void exchange(const char *label, const char *host, uint16_t port,
             received += (size_t)count;
         }
         check(sent == sizeof(request_bytes) - 1, "complete request written");
-        check(received == sizeof(expected_response) - 1 &&
-              memcmp(response, expected_response, received) == 0, "exact HTTP response bytes");
+        check(received == expected_size &&
+              memcmp(response, expected_bytes, received) == 0, "exact HTTP response bytes");
         check(count == 0 && tls_stream_status(stream) == TLS_OK, "authenticated orderly close");
     }
     printf("RESULT %s status=%d stage=%d code=%d verify=%lu elapsed_ms=%lld\n",
@@ -98,6 +115,15 @@ static void exchange(const char *label, const char *host, uint16_t port,
     tls_stream_destroy(stream);
     check(transport.socket_fd == -1, "transport released");
     lwip_transport_destroy(&transport);
+    if (ecdsa) {
+        struct allocation_measurement final = allocation_measure_end();
+        check(final.live == 0 && final.bytes == 0 && final.rejected == 0,
+              "ECDSA tracked allocations released without injection");
+        check(final.peak >= opened.peak && opened.peak >= opened.bytes && opened.peak > 0,
+              "ECDSA allocation peak includes setup and handshake");
+        printf("ECDSA_MEMORY label=%s open_bytes=%zu open_peak=%zu peak=%zu final_live=%u final_bytes=%zu\n",
+               label, opened.bytes, opened.peak, final.peak, final.live, final.bytes);
+    }
 }
 
 struct cancel_request {
@@ -297,8 +323,8 @@ int main(int argc, char **argv)
          strcmp(argv[3], "--handshake-allocations") == 0 || strcmp(argv[3], "--records") == 0 ||
          strcmp(argv[3], "--boundaries") == 0 || strcmp(argv[3], "--throughput") == 0 ||
          strcmp(argv[3], "--memory") == 0 || strcmp(argv[3], "--exhaustion") == 0 ||
-         strcmp(argv[3], "--chains") == 0))) {
-        fprintf(stderr, "Usage: %s TAP_INTERFACE CA_FILE [--faults|--pressure|--connections|--sessions|--security|--allocations|--handshake-allocations|--records|--boundaries|--throughput|--memory|--exhaustion|--chains]\n", argv[0]);
+         strcmp(argv[3], "--chains") == 0 || strcmp(argv[3], "--ecdsa") == 0))) {
+        fprintf(stderr, "Usage: %s TAP_INTERFACE CA_FILE [--faults|--pressure|--connections|--sessions|--security|--allocations|--handshake-allocations|--records|--boundaries|--throughput|--memory|--exhaustion|--chains|--ecdsa]\n", argv[0]);
         return 2;
     }
     ca_path = argv[2];
@@ -315,6 +341,7 @@ int main(int argc, char **argv)
     memory = argc == 4 && strcmp(argv[3], "--memory") == 0;
     exhaustion = argc == 4 && strcmp(argv[3], "--exhaustion") == 0;
     chains = argc == 4 && strcmp(argv[3], "--chains") == 0;
+    ecdsa = argc == 4 && strcmp(argv[3], "--ecdsa") == 0;
     if (tap_network_open(argv[1])) {
         perror("open private TAP interface");
         return 2;

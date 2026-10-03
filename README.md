@@ -560,6 +560,41 @@ capture. All certificate messages remain below 16 KiB. Fragmented larger
 handshake messages, other key sizes/algorithms, multiple roots, wider concurrency,
 target memory budgets and performance changes are outside this increment.
 
+## ECDSA authentication profile
+
+The core already allows ECDHE-ECDSA-AES128-GCM-SHA256. This profile validates
+that existing path without changing its cipher policy or runtime code:
+
+```sh
+sudo python3 tools/run_local.py --uid "$(id -u)" --ecdsa
+sudo python3 tools/run_local.py --uid "$(id -u)" --binary build/ubsan/tls_probe --ecdsa
+```
+
+Both runs passed 54 checks across eight attempts: a valid connection, wrong
+hostname, recovery, unknown root, recovery, unavailable time, unavailable entropy
+and final recovery. The existing baseline driver and peer are reused with P-256
+root/leaf keys, ECDSA SHA-256 signatures and an ECDSA-only TLS 1.2 peer. OpenSSL
+independently checks key/signature algorithms, valid chains, wrong hostname and
+wrong root before the probe runs; results are saved in `ecdsa-fixtures.json`.
+Peer accounting requires the exact negotiated suite, SNI, request bytes and
+expected certificate alerts. Successful responses include NUL and high-bit
+bytes across multiple TLS records, followed by authenticated EOF.
+
+Certificate rejections require exact verification flags, immediate socket
+release and no output from a subsequent read. All eight attempts release their
+tracked allocations. Successful connections measured 39,812-39,814 live bytes
+after open and 45,336-45,346 peak bytes across these two runs. Values can vary
+with generated DER signatures and cryptographic allocation paths; they are
+observations, not fixed limits or evidence of an optimization. The existing
+tracker measures direct linked calloc/free requests on the test thread, not
+allocator overhead, other tasks or device RAM. RSA baseline, certificate/closure,
+pre-network allocation and sampled handshake-allocation regressions also passed
+with undefined-behavior instrumentation.
+
+This covers direct-root P-256 authentication only. ECDSA intermediate chains,
+mixed key algorithms, other curves, ECDSA-specific allocation-failure injection,
+TLS 1.3, target performance and firmware qualification remain outside this test.
+
 ## Dependency baseline and limits
 
 `dependencies.json` pins full commits; bootstrap never patches dependencies.
