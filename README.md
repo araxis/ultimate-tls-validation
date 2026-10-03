@@ -315,6 +315,57 @@ a new lookup fails without allocating more memory. This is caller cancellation,
 not cancellation of packets already sent by lwIP. The cancellation source must
 finish before its transport context is destroyed.
 
+## ESP32-S3 compiler comparison
+
+`tools/measure_target.py` accepts a saved ESP-IDF compilation database and SDK:
+
+```sh
+python3 tools/measure_target.py \
+  --compile-commands /path/to/controller/build/compile_commands.json \
+  --sdk /path/to/esp-idf \
+  --baseline 3a7982d51f9ff16f25342810a91c692c047d10e4
+```
+
+It replaces the original TLS source/include with isolated standalone copies,
+retains the command's target flags and generated `mbedtls/esp_config.h`
+configuration, and compiles before/after objects with `-fstack-usage`. It does
+not invoke the firmware build, link, run target code or install an image. Each
+`evidence/target-*` directory records the original command, compiler identity,
+configuration snapshots, consumed-header hashes, source hashes, objects,
+disassembly, layout symbols and direct frame reports. The tool rejects a compile
+that uses another public TLS header or misses the expected SDK configuration.
+
+The saved controller configurations produced these compile-only results, with
+their existing `-Og` flags:
+
+| SDK / Mbed TLS | ESP32-S3 GCC build | Read frame before | Read frame after | Stream object |
+| --- | --- | ---: | ---: | ---: |
+| ESP-IDF 5.3.1 / 3.6.0 | 13.2.0, 20240530 | 32 bytes | 544 bytes | 544 bytes |
+| ESP-IDF 5.3.6 / 3.6.7 | 13.2.0, 20250707 | 32 bytes | 544 bytes | 544 bytes |
+
+Both target compilers report a 512-byte increase for read staging, compared with
+528 bytes on the measured x86-64 host. The 544-byte target stream object is
+unchanged by the fix; it includes the SSL context (252 bytes), configuration
+(140 bytes) and DRBG (76 bytes). The separate root-node structure is 408 bytes;
+certificate/key data and other dynamic allocations are additional. Neither the
+object size nor the direct read frame measures a session's total memory.
+
+These SDK configurations enable hardware AES/MPI/SHA, internal-memory TLS
+allocation, 16,384-byte incoming and 4,096-byte outgoing record buffers, retained
+peer certificates and fixed buffer lengths. The host allocation figures above
+cannot be used as target heap budgets. SDK 5.3.1 was installed from an archive:
+its version headers and consumed inputs are captured, but its saved command's
+`IDF_VER` is `HEAD-HASH-NOTFOUND` and no SDK Git revision is claimed. SDK 5.3.6
+has a recorded Git revision in the measurement evidence.
+
+Both SDKs contain ESP-IDF's FreeRTOS 10.5.1 kernel and an Xtensa `StackType_t` of
+`uint8_t`. This differs from the management processor's FreeRTOS 10.2.0 and the
+lab's POSIX FreeRTOS 11.1.0. The existing controller's 12,288-byte TLS-worker
+setting is context, not a validated budget for this candidate. The isolated
+wrapper does not exercise a FreeRTOS task or the firmware adapter, and these
+measurements do not qualify another runtime port, hardware entropy, complete
+call-chain stack use, target heap retention or the read copy's execution cost.
+
 ## Dependency baseline and limits
 
 `dependencies.json` pins full commits; bootstrap never patches dependencies.
