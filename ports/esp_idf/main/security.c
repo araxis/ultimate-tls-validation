@@ -2,13 +2,7 @@
 #include "authentication.h"
 #include "transport.h"
 #include "fixture.h"
-#include "lwip_dns.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "freertos/semphr.h"
-#include "lwip/tcpip.h"
-#include "lwip/priv/tcp_priv.h"
-#include "esp_timer.h"
+#include "network_probe.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -71,36 +65,6 @@ static void run_case(const security_case *test, bool ready, void (*check)(bool, 
     check(transport.socket_fd == -1, "security destruction leaves socket released");
 }
 
-typedef struct { SemaphoreHandle_t done; unsigned active, timewait; } network_state;
-
-static void capture(void *argument)
-{
-    network_state *state = argument;
-    for (struct tcp_pcb *p = tcp_active_pcbs; p; p = p->next) ++state->active;
-    for (struct tcp_pcb *p = tcp_tw_pcbs; p; p = p->next) ++state->timewait;
-    xSemaphoreGive(state->done);
-}
-
-static void cooldown(void (*check)(bool, const char *))
-{
-    SemaphoreHandle_t done = xSemaphoreCreateBinary();
-    configASSERT(done);
-    int64_t start = esp_timer_get_time();
-    network_state state;
-    do {
-        state = (network_state){.done = done};
-        configASSERT(tcpip_callback(capture, &state) == ERR_OK);
-        configASSERT(xSemaphoreTake(done, pdMS_TO_TICKS(1000)) == pdTRUE);
-        if (!state.active && !state.timewait) break;
-        vTaskDelay(pdMS_TO_TICKS(2000));
-    } while (esp_timer_get_time() - start < 135000000LL);
-    unsigned pending = lwip_dns_pending();
-    check(!state.active && !state.timewait && !pending, "security network state drained naturally");
-    printf("SECURITY_CLEANUP active=%u timewait=%u dns=%u elapsed=%lld\n",
-           state.active, state.timewait, pending, (long long)((esp_timer_get_time() - start) / 1000));
-    vSemaphoreDelete(done);
-}
-
 void security_probe(bool ready, void (*check)(bool, const char *))
 {
     static const security_case cases[] = {
@@ -118,5 +82,5 @@ void security_probe(bool ready, void (*check)(bool, const char *))
         snprintf(label, sizeof(label), "recovery-%s", cases[i].label);
         authentication_recovery(label, ready, check);
     }
-    cooldown(check);
+    probe_network_cooldown("SECURITY_CLEANUP", check);
 }

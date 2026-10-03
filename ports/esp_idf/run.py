@@ -23,6 +23,7 @@ from resources import check_count as resource_checks, account as resource_accoun
 from allocation_failures import CHECKS as ALLOCATION_CHECKS, account as allocation_account
 from security import CHECKS as SECURITY_CHECKS, account as security_account
 from security_peers import serve_closure
+from sessions import CHECKS as SESSION_CHECKS, account as session_account, stalled_session
 
 
 def probe(args):
@@ -37,6 +38,7 @@ def probe(args):
         raise ValueError('Evidence already contains a run; prepare a new fixture')
     authentication = build.get('suite') == 'authentication'
     security = build.get('suite') == 'security'
+    sessions = build.get('suite') == 'sessions'
     timing = build.get('suite') == 'timing'
     socket_waits = build.get('suite') == 'socket-waits'
     dns_waits = build.get('suite') == 'dns-waits'
@@ -58,6 +60,9 @@ def probe(args):
     start = time.monotonic()
     try:
         peers.listen(socket.SOCK_STREAM, 8443, peers.tls, 'trusted')
+        if sessions:
+            peers.listen(socket.SOCK_STREAM,8464,lambda listener: stalled_session(peers,listener))
+            peers.listen(socket.SOCK_STREAM,8465,peers.tls,'trusted')
         if security:
             peers.listen(socket.SOCK_STREAM, 8456, peers.tls, 'expired')
             peers.listen(socket.SOCK_STREAM, 8457, peers.tls, 'future')
@@ -80,14 +85,14 @@ def probe(args):
         # Keep input open: EOF disconnects QEMU's stdio character backend.
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.PIPE)
         # Read bytes instead of blocking readline, retaining partial panic output.
-        while time.monotonic() - start < (200 if security else 465 if allocations else 155 * rounds if resources else 60):
+        while time.monotonic() - start < (200 if security or sessions else 465 if allocations else 155 * rounds if resources else 60):
             ready, _, _ = select.select([process.stdout], [], [], 0.25)
             if ready:
                 chunk = os.read(process.stdout.fileno(), 65536)
                 if not chunk:
                     break
                 output.extend(chunk)
-                if allocations or security:
+                if allocations or security or sessions:
                     with (directory / 'guest-progress.log').open('ab') as progress:
                         progress.write(chunk)
                     if re.search(rb'\nFAIL |assert failed|Guru Meditation', output):
@@ -135,6 +140,8 @@ def probe(args):
     accounting = account(text, peers.events, ecdsa) if authentication else {}
     if security:
         accounting = security_account(text, peers.events)
+    if sessions:
+        accounting = session_account(text, peers.events)
     if timing:
         accounting = timing_account(text, peers.events)
     if socket_waits:
@@ -145,9 +152,9 @@ def probe(args):
         accounting = resource_account(text, peers.events, ecdsa, rounds)
     if allocations:
         accounting = allocation_account(text, peers.events, ecdsa)
-    if authentication or timing or socket_waits or dns_waits or resources or allocations or security:
+    if authentication or timing or socket_waits or dns_waits or resources or allocations or security or sessions:
         peer_ok = accounting['peer_accounting_passed']
-    expected_checks = SECURITY_CHECKS if security else ALLOCATION_CHECKS if allocations else resource_checks(rounds) if resources else DNS_CHECKS if dns_waits else SOCKET_CHECKS if socket_waits else TIMING_CHECKS if timing else (CHECKS if authentication else 10)
+    expected_checks = SESSION_CHECKS if sessions else SECURITY_CHECKS if security else ALLOCATION_CHECKS if allocations else resource_checks(rounds) if resources else DNS_CHECKS if dns_waits else SOCKET_CHECKS if socket_waits else TIMING_CHECKS if timing else (CHECKS if authentication else 10)
     passed = (failure is None and completed and len(summaries) == 1 and summaries[0][:2] == (str(expected_checks), '0')
               and int(summaries[0][2]) > 0 and summaries[0][3] == directory.name
               and len(re.findall(r'^PASS ', text, re.M)) == expected_checks
@@ -162,6 +169,7 @@ def probe(args):
               'resources': accounting if resources else {},
               'allocations': accounting if allocations else {},
               'security': accounting if security else {},
+              'sessions': accounting if sessions else {},
               'peer_accounting_passed': peer_ok, 'checks': int(summaries[0][0]) if len(summaries) == 1 else None,
               'elapsed_seconds': time.monotonic() - start, 'command': command,
               'qemu_sha256': hashlib.sha256(args.qemu.read_bytes()).hexdigest(),
@@ -195,7 +203,7 @@ def main():
         process = subprocess.run(['runuser', '-u', user, '--', sys.executable, str(Path(__file__).resolve()),
                                   '--child', '--uid', str(args.uid), '--evidence', str(args.evidence.resolve()),
                                   '--qemu', str(args.qemu.resolve())],
-                                 timeout=225 if build.get('suite') == 'security' else 490 if build.get('suite') == 'allocation-failures' else 155 * rounds + 25)
+                                 timeout=225 if build.get('suite') in ('security','sessions') else 490 if build.get('suite') == 'allocation-failures' else 155 * rounds + 25)
         return process.returncode
     finally:
         subprocess.run([sys.executable, str(ROOT / 'tools/tap.py'), 'remove'], check=True)

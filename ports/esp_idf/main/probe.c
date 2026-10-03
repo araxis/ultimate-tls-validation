@@ -7,6 +7,7 @@
 #include "resource_probe.h"
 #include "allocation_failures.h"
 #include "security.h"
+#include "sessions.h"
 #include "esp_eth.h"
 #include "esp_event.h"
 #include "esp_netif.h"
@@ -82,7 +83,9 @@ void app_main(void)
     struct timeval utc = {.tv_sec = LAB_UTC_SECONDS, .tv_usec = 0};
     bool clock_ready = settimeofday(&utc, NULL) == 0;
     check(clock_ready, "fixture UTC installed");
-#if defined(LAB_SECURITY)
+#if defined(LAB_SESSIONS)
+    sessions_probe(connected && clock_ready, check);
+#elif defined(LAB_SECURITY)
     security_probe(connected && clock_ready, check);
 #elif defined(LAB_ALLOCATION_FAILURES)
     allocation_failures_probe(connected && clock_ready, check);

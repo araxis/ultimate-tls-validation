@@ -381,6 +381,27 @@ whole-heap claim. The initial run passed all 98 checks; authentication and smoke
 regressions passed 83 and ten checks. This profile covers RSA only and does not
 qualify arbitrary corrupted input, all completion races or physical hardware.
 
+## Two task session isolation
+
+Prepare with `--sessions` for 38 checks using two authenticated RSA connections
+owned by different tasks pinned to opposite cores. The controller waits until
+both connections are established, then cancels a blocked read on one task. The
+other connection must remain established and uncancelled, exchange exact bytes
+after the failed stream is destroyed, and finish with authenticated EOF. A
+fresh connection verifies recovery. The second round reverses core assignments.
+
+Task completion barriers protect the fixture contexts. A TLS-protected ready
+byte establishes that the cancelled connection reached its intended read; the
+controller signals cancellation after the observed read callback starts. It
+requires completion within 250 ms, unchanged failed-read output, exact terminal
+diagnostics and socket release. Task stacks are fixture settings, not recommended
+production sizes. The single-task allocation meter is deliberately not enabled.
+
+The independent peer records the negotiated protocol while each connection is
+live and confirms the stalled request and closure. A final natural cleanup must
+leave no active/closing TCP records or pending DNS. This is finite two-task
+isolation coverage, not an exhaustive concurrency, heap or hardware claim.
+
 ## Boundaries
 
 The adapter has nonblocking lwIP socket operations with a bounded wait budget.

@@ -25,6 +25,7 @@ def main():
     parser.add_argument('--tools', required=True, type=Path)
     parser.add_argument('--idf-python', required=True, type=Path)
     suite = parser.add_mutually_exclusive_group()
+    suite.add_argument('--sessions', action='store_true', help='Build two-task cancellation and session isolation cases')
     suite.add_argument('--security', action='store_true', help='Build RSA certificate-date and abrupt-closure cases')
     suite.add_argument('--authentication', choices=('rsa', 'ecdsa'),
                         help='Build rejection/recovery cases for this certificate profile')
@@ -45,7 +46,7 @@ def main():
     env = os.environ.copy()
     env.update(IDF_PATH=str(args.sdk.resolve()), IDF_TOOLS_PATH=str(args.tools.resolve()))
     report = {'prepared': False, 'commands': [], 'fixture': str(directory),
-              'suite': 'security' if args.security else 'allocation-failures' if args.allocation_failures else 'memory-accounting' if args.memory_accounting else 'dns-waits' if args.dns_waits else 'socket-waits' if args.socket_waits else 'timing' if args.timing else ('authentication' if args.authentication else 'smoke'),
+              'suite': 'sessions' if args.sessions else 'security' if args.security else 'allocation-failures' if args.allocation_failures else 'memory-accounting' if args.memory_accounting else 'dns-waits' if args.dns_waits else 'socket-waits' if args.socket_waits else 'timing' if args.timing else ('authentication' if args.authentication else 'smoke'),
               'profile': args.authentication or args.memory_accounting or args.allocation_failures or 'rsa'}
     if args.memory_accounting:
         report['memory_rounds'] = args.memory_rounds
@@ -92,6 +93,7 @@ def main():
             '#define LAB_RUN_ID ' + json.dumps(directory.name) + '\n' +
             '#define LAB_UTC_SECONDS ' + str(utc) + 'LL\n' +
             ('#define LAB_SECURITY 1\n' if args.security else '') +
+            ('#define LAB_SESSIONS 1\n' if args.sessions else '') +
             ('#define LAB_TIMING 1\n' if args.timing else '') +
             ('#define LAB_SOCKET_WAITS 1\n' if args.socket_waits else '') +
             ('#define LAB_DNS_WAITS 1\n' if args.dns_waits else '') +

@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "probe.c" "authentication.c" "timing.c" "socket_waits.c" "dns_waits.c" "resource_probe.c" "allocation_meter.c" "allocation_failures.c" "security.c" "transport.c" "../../../src/tls_stream.c" "../../../platform/lwip_dns.c"
+    SRCS "probe.c" "authentication.c" "timing.c" "socket_waits.c" "dns_waits.c" "resource_probe.c" "allocation_meter.c" "allocation_failures.c" "security.c" "network_probe.c" "sessions.c" "transport.c" "../../../src/tls_stream.c" "../../../platform/lwip_dns.c"
     INCLUDE_DIRS "." "../../../include" "../../../platform" "${LAB_FIXTURE_DIR}"
     REQUIRES mbedtls esp_eth esp_netif esp_event esp_timer esp_hw_support lwip heap)
 target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra -Werror)
