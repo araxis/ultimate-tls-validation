@@ -24,6 +24,7 @@ from record_fault_peer import MODES as RECORD_MODES, serve_record_fault, record_
 from boundary_peer import MODES as BOUNDARY_MODES, serve_boundary, boundary_accounting
 from throughput_peer import serve_throughput, throughput_accounting
 from memory_peer import serve_memory, memory_accounting
+from chain_peers import make_chains, serve_chain, chain_accounting
 
 ROOT = Path(__file__).resolve().parents[1]
 ADDRESS = '192.0.2.1'
@@ -215,7 +216,11 @@ class Peers:
             finally:
                 connection.close()
 
-    def start(self, connections=False, sessions=False, security=False, handshake_allocations=False, records=False, boundaries=False, throughput=False, memory=False, exhaustion=False):
+    def start(self, connections=False, sessions=False, security=False, handshake_allocations=False, records=False, boundaries=False, throughput=False, memory=False, exhaustion=False, chains=False):
+        if chains:
+            for profile in range(4):
+                self.listen(socket.SOCK_STREAM, 8480 + profile,
+                            lambda listener, profile: serve_chain(self, listener, profile), profile)
         if exhaustion:
             self.listen(socket.SOCK_STREAM, 8479, lambda listener: serve_allocations(self, listener))
         if memory:
@@ -288,6 +293,7 @@ def main():
     suites.add_argument('--throughput', action='store_true')
     suites.add_argument('--memory', action='store_true')
     suites.add_argument('--exhaustion', action='store_true')
+    suites.add_argument('--chains', action='store_true')
     args = parser.parse_args()
     directory = ROOT / 'evidence' / datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
     directory.mkdir(parents=True)
@@ -302,13 +308,15 @@ def main():
         make_certificate(directory, name)
     if args.security:
         make_dated_certificates(directory)
+    if args.chains:
+        make_chains(directory)
     peers = Peers(directory)
     start = time.monotonic()
     returncode, output, failure = None, '', None
     try:
         peers.start(connections=args.connections, sessions=args.sessions, security=args.security,
                     handshake_allocations=args.handshake_allocations, records=args.records, boundaries=args.boundaries,
-                    throughput=args.throughput, memory=args.memory, exhaustion=args.exhaustion)
+                    throughput=args.throughput, memory=args.memory, exhaustion=args.exhaustion, chains=args.chains)
         command = [str(args.binary.resolve()), 'ult-tls0', str(directory / 'trusted-ca.pem')]
         if args.faults:
             command.append('--faults')
@@ -334,6 +342,8 @@ def main():
             command.append('--memory')
         if args.exhaustion:
             command.append('--exhaustion')
+        if args.chains:
+            command.append('--chains')
         completed = subprocess.run(command,
                                    text=True, capture_output=True, timeout=210 if args.memory else 75)
         returncode = completed.returncode
@@ -491,12 +501,20 @@ def main():
                    and not alerts and sni == ['tls.lab.test'] and dns == {'tls.lab.test'}
                    and not any(event['kind'] == 'fixture-error' for event in peers.events))
         expected_checks = 81
+    if args.chains:
+        indexes = re.findall(r'^RESULT chain index=(\d+) ', output, re.MULTILINE)
+        complete = indexes == [str(index) for index in range(16)] and attempts == ['chain'] * 16 + ['chains-recovery']
+        peer_ok = (chain_accounting(peers.events)
+                   and len(requests) == 1 and requests[0]['exact'] and requests[0]['server'] == 'trusted'
+                   and not alerts and sni == ['tls.lab.test'] and dns == {'tls.lab.test'}
+                   and not any(event['kind'] == 'fixture-error' for event in peers.events))
+        expected_checks = 135
     passed = (returncode == 0 and summary is not None and int(summary[1]) == expected_checks and int(summary[2]) == 0
               and all(int(summary[index]) > 0 for index in (3, 4, 5))
               and complete and peer_ok and failure is None)
     report = {'passed': passed, 'returncode': returncode, 'failure': failure,
               'allocator_tunables': os.environ.get('GLIBC_TUNABLES'),
-              'suite': 'exhaustion' if args.exhaustion else 'memory' if args.memory else 'throughput' if args.throughput else 'boundaries' if args.boundaries else 'records' if args.records else 'handshake-allocations' if args.handshake_allocations else 'allocations' if args.allocations else 'security' if args.security else 'sessions' if args.sessions else 'connections' if args.connections else 'pressure' if args.pressure else 'wait-faults' if args.faults else 'baseline',
+              'suite': 'chains' if args.chains else 'exhaustion' if args.exhaustion else 'memory' if args.memory else 'throughput' if args.throughput else 'boundaries' if args.boundaries else 'records' if args.records else 'handshake-allocations' if args.handshake_allocations else 'allocations' if args.allocations else 'security' if args.security else 'sessions' if args.sessions else 'connections' if args.connections else 'pressure' if args.pressure else 'wait-faults' if args.faults else 'baseline',
               'elapsed_seconds': time.monotonic() - start, 'peer_accounting_passed': peer_ok,
               'complete_attempts': complete,
               'checks': int(summary[1]) if summary else None,

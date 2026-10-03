@@ -11,6 +11,7 @@
 #include "throughput.h"
 #include "memory.h"
 #include "exhaustion.h"
+#include "chains.h"
 #include "tap_network.h"
 #include "FreeRTOS.h"
 #include "task.h"
@@ -36,6 +37,7 @@ static bool boundaries;
 static bool throughput;
 static bool memory;
 static bool exhaustion;
+static bool chains;
 static const uint8_t request_bytes[] = "GET /probe HTTP/1.1\r\nHost: tls.lab.test\r\nConnection: close\r\n\r\n";
 
 static void check(bool passed, const char *label)
@@ -191,7 +193,12 @@ static void client_task(void *context)
     printf("FreeRTOS=%s lwIP=%s MbedTLS=%s\n", tskKERNEL_VERSION_NUMBER,
            LWIP_VERSION_STRING, MBEDTLS_VERSION_STRING);
     TickType_t start = xTaskGetTickCount();
-    if (exhaustion) {
+    if (chains) {
+        struct chain_results result = chain_tests(ca_path);
+        checks += result.checks;
+        failures += result.failures;
+        exchange("chains-recovery", "tls.lab.test", 8443, TLS_OK, 0, true, true);
+    } else if (exhaustion) {
         struct exhaustion_results result = exhaustion_tests(ca_path);
         checks += result.checks;
         failures += result.failures;
@@ -289,8 +296,9 @@ int main(int argc, char **argv)
          strcmp(argv[3], "--security") == 0 || strcmp(argv[3], "--allocations") == 0 ||
          strcmp(argv[3], "--handshake-allocations") == 0 || strcmp(argv[3], "--records") == 0 ||
          strcmp(argv[3], "--boundaries") == 0 || strcmp(argv[3], "--throughput") == 0 ||
-         strcmp(argv[3], "--memory") == 0 || strcmp(argv[3], "--exhaustion") == 0))) {
-        fprintf(stderr, "Usage: %s TAP_INTERFACE CA_FILE [--faults|--pressure|--connections|--sessions|--security|--allocations|--handshake-allocations|--records|--boundaries|--throughput|--memory|--exhaustion]\n", argv[0]);
+         strcmp(argv[3], "--memory") == 0 || strcmp(argv[3], "--exhaustion") == 0 ||
+         strcmp(argv[3], "--chains") == 0))) {
+        fprintf(stderr, "Usage: %s TAP_INTERFACE CA_FILE [--faults|--pressure|--connections|--sessions|--security|--allocations|--handshake-allocations|--records|--boundaries|--throughput|--memory|--exhaustion|--chains]\n", argv[0]);
         return 2;
     }
     ca_path = argv[2];
@@ -306,6 +314,7 @@ int main(int argc, char **argv)
     throughput = argc == 4 && strcmp(argv[3], "--throughput") == 0;
     memory = argc == 4 && strcmp(argv[3], "--memory") == 0;
     exhaustion = argc == 4 && strcmp(argv[3], "--exhaustion") == 0;
+    chains = argc == 4 && strcmp(argv[3], "--chains") == 0;
     if (tap_network_open(argv[1])) {
         perror("open private TAP interface");
         return 2;

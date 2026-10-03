@@ -512,6 +512,54 @@ fragmentation, larger certificate chains and other concurrent interleavings
 remain unqualified. No runtime TLS implementation change or performance
 improvement is claimed by this test increment.
 
+## Certificate-chain allocation peaks
+
+```sh
+sudo python3 tools/run_local.py --uid 1000 --binary build/tls_probe --chains
+```
+
+The 135-check suite measures four certificate profiles, each with 512-byte and
+16,384-byte TLS application records, then repeats the complete matrix. Every
+connection transfers and verifies 65,536 bytes before authenticated EOF and
+destruction. A final ordinary authenticated HTTP exchange checks recovery.
+Both normal and undefined-behavior-instrumented runs passed; related exhaustion,
+pre-network allocation and sampled handshake-allocation regressions also passed.
+
+All profiles use the same trusted root, RSA-2048 leaf key and
+ECDHE-RSA-AES128-GCM-SHA256 cipher within a run. The root is not sent by the peer.
+The fourth profile adds an 8 KiB noncritical private extension to the leaf: this
+is an explicit synthetic size stressor, not a representative certificate policy.
+OpenSSL independently verifies the generated chains and hostname. DER lengths,
+hashes and verification results are recorded in `chain-inventory.json`.
+
+| Peer certificate profile | Certificate message bytes | Open-session tracked bytes | Handshake peak bytes |
+| --- | ---: | ---: | ---: |
+| Direct root signature | 863 | 41,486 | 48,586 |
+| One intermediate | 1,655 | 43,787 | 50,887 |
+| Three intermediates | 3,275 | 48,425 | 55,525 |
+| Three intermediates, padded leaf | 11,492 | 56,642 | 63,742 |
+
+These values agreed across both record sizes, both passes and both builds.
+Transfer-phase peaks equaled the open-session allocations: larger data records
+added no tracked allocation peak in this fixed-buffer host configuration. All
+tracked allocations returned to zero after every connection. The padded leaf
+adds 8,217 DER bytes including extension encoding, matching its allocation
+increase over the three-intermediate profile in this experiment.
+
+Phase peaks start from current live bytes; the lifetime peak is preserved
+separately. Preparing the root and stream consumed 2,733 live bytes with a
+3,286-byte peak. Neither value should be added to the handshake totals, which
+already include those live allocations. All figures are requested bytes from
+direct linked calloc/free calls on the owning thread, excluding allocator
+metadata, other tasks and other allocation paths. They are not device RAM costs.
+
+The peer constructs each application record explicitly and checks its TLS 1.2
+framing and GCM size; the client continues reading in 512-byte chunks. Certificate
+message lengths above are calculated from the actual DER chain, not a packet
+capture. All certificate messages remain below 16 KiB. Fragmented larger
+handshake messages, other key sizes/algorithms, multiple roots, wider concurrency,
+target memory budgets and performance changes are outside this increment.
+
 ## Dependency baseline and limits
 
 `dependencies.json` pins full commits; bootstrap never patches dependencies.

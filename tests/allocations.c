@@ -12,7 +12,7 @@ void __real_free(void *pointer);
 static _Thread_local struct {
     bool enabled;
     unsigned attempts, fail_at, injected, live, rejected;
-    size_t bytes, peak, limit;
+    size_t bytes, peak, limit, phase_peak;
     struct { void *pointer; size_t bytes; } slots[256];
 } allocation;
 
@@ -30,9 +30,16 @@ void allocation_measure_limit(size_t bytes)
     allocation.limit = bytes;
 }
 
+void allocation_measure_phase(void)
+{
+    if (!allocation.enabled) abort();
+    allocation.phase_peak = allocation.bytes;
+}
+
 struct allocation_measurement allocation_measure_read(void)
 {
-    return (struct allocation_measurement){allocation.live, allocation.bytes, allocation.peak, allocation.rejected};
+    return (struct allocation_measurement){allocation.live, allocation.bytes, allocation.peak,
+                                          allocation.rejected, allocation.phase_peak};
 }
 
 struct allocation_measurement allocation_measure_end(void)
@@ -63,6 +70,7 @@ void *__wrap_calloc(size_t count, size_t size)
             ++allocation.live;
             allocation.bytes += count * size;
             if (allocation.bytes > allocation.peak) allocation.peak = allocation.bytes;
+            if (allocation.bytes > allocation.phase_peak) allocation.phase_peak = allocation.bytes;
             return pointer;
         }
     }
