@@ -31,7 +31,7 @@ static void capture_network(void *argument)
     xSemaphoreGive(snapshot->done);
 }
 
-static void report(unsigned attempt, const char *phase, SemaphoreHandle_t done,
+void resource_snapshot(unsigned attempt, const char *phase, SemaphoreHandle_t done,
                    void (*check)(bool, const char *))
 {
     allocation_meter_pause(true);
@@ -81,10 +81,10 @@ static void exchange(tls_stream *stream, void (*check)(bool, const char *))
     check(count == 0 && tls_stream_status(stream) == TLS_OK, "authenticated EOF");
 }
 
-static void cooldown(unsigned attempt, SemaphoreHandle_t done, void (*check)(bool, const char *))
+void resource_cooldown(unsigned attempt, SemaphoreHandle_t done, void (*check)(bool, const char *))
 {
     allocation_meter_begin();
-    report(attempt, "cooldown-start", done, check);
+    resource_snapshot(attempt, "cooldown-start", done, check);
     int64_t until = esp_timer_get_time() + 135000000LL;
     network_snapshot network;
     do {
@@ -95,7 +95,7 @@ static void cooldown(unsigned attempt, SemaphoreHandle_t done, void (*check)(boo
         vTaskDelay(pdMS_TO_TICKS(2000));
     } while (esp_timer_get_time() < until);
     check(network.active == 0 && network.timewait == 0, "TCP records expired on natural timers");
-    report(attempt, "cooldown-end", done, check);
+    resource_snapshot(attempt, "cooldown-end", done, check);
     allocation_meter_end();
 }
 
@@ -110,21 +110,21 @@ void resource_probe(bool ready, void (*check)(bool, const char *))
         bool rejection = attempt % 2;
         printf("ATTEMPT resource-%u-%s\n", attempt, rejection ? "reject" : "valid");
         allocation_meter_begin();
-        report(attempt, "before", done, check);
+        resource_snapshot(attempt, "before", done, check);
         idf_transport transport;
         check(idf_transport_init(&transport, lab_root, sizeof(lab_root)) == 0, "root parsed");
         transport.clock_ready = ready;
-        report(attempt, "root", done, check);
+        resource_snapshot(attempt, "root", done, check);
         tls_stream_port port = idf_transport_port(&transport);
         tls_stream *stream = tls_stream_create(&port);
         check(stream != NULL, "stream allocated");
-        report(attempt, "created", done, check);
+        resource_snapshot(attempt, "created", done, check);
         tls_status status = tls_stream_open(stream, "192.0.2.1", rejection ? 8444 : 8443, 5000);
         tls_stream_diagnostics diagnostic = tls_stream_diagnostic(stream);
         check(status == (rejection ? TLS_ERROR : TLS_OK) && diagnostic.stage == TLS_STAGE_HANDSHAKE &&
               diagnostic.code == (rejection ? MBEDTLS_ERR_X509_CERT_VERIFY_FAILED : 0) &&
               diagnostic.verify_flags == (rejection ? MBEDTLS_X509_BADCERT_CN_MISMATCH : 0), "exact resource-case diagnostic");
-        report(attempt, "opened", done, check);
+        resource_snapshot(attempt, "opened", done, check);
         if (!rejection && status == TLS_OK) exchange(stream, check);
         else if (rejection) {
             uint8_t byte = 0xa5;
@@ -136,11 +136,11 @@ void resource_probe(bool ready, void (*check)(bool, const char *))
         tls_stream_destroy(stream);
         idf_transport_destroy(&transport);
         check(transport.socket_fd == -1, "destroy released socket");
-        report(attempt, "destroyed", done, check);
+        resource_snapshot(attempt, "destroyed", done, check);
         vTaskDelay(pdMS_TO_TICKS(500));
-        report(attempt, "settled", done, check);
+        resource_snapshot(attempt, "settled", done, check);
         allocation_meter_end();
-        if ((attempt + 1) % 8 == 0) cooldown(attempt + 1, done, check);
+        if ((attempt + 1) % 8 == 0) resource_cooldown(attempt + 1, done, check);
     }
     vSemaphoreDelete(done);
 }

@@ -212,8 +212,8 @@ and wraps ESP-IDF's Mbed TLS allocator. Both forward to the unchanged allocators
 The verified SDK configuration uses internal 8-bit heap allocation. The meter
 counts requested bytes on the main task; it excludes allocator metadata, other
 tasks and unwrapped paths. Its 256-entry registry fails on overflow instead of
-under-counting. Metadata occupies 4,125 bytes of linked symbols, excluding
-alignment and code. The ordinary DNS regression verifies that these wrappers
+under-counting. The initial measurement's metadata occupied 4,125 bytes of linked
+symbols, excluding alignment and code. The ordinary DNS regression verifies that these wrappers
 and the resource probe are absent from its linked image.
 
 Observed with ESP-IDF 5.3.6, 16,384-byte incoming and 4,096-byte outgoing TLS
@@ -288,6 +288,50 @@ not fully attributed. These are separate fixtures from the one-round measurement
 above; compare endpoints within each run rather than treating small differences
 between separate images as a retention trend. Stack watermarks were stable at
 all three endpoints, without changing configured stack sizes.
+
+## Selected allocation failures and recovery
+
+Prepare with `--allocation-failures rsa` or `--allocation-failures ecdsa`.
+Each separate profile requires 174 checks. It first warms the runtime through an
+authenticated exchange and natural TCP cleanup, then repeats two cycles of:
+
+- Rejecting the stream object's allocation before creating a handle.
+- Rejecting the first scoped allocation during TLS setup, before TCP open.
+- Rejecting the first scoped allocation after TCP connects, during the handshake.
+
+Every failure is followed by a fresh authenticated exchange. Each cycle ends
+with natural TCP cleanup before taking its global heap comparison. Expect about
+six minutes per run. A failed check, failed assertion or panic stops the
+runner with the partial evidence preserved; a failed attempt is never reported
+as a completed suite.
+
+The test meter returns NULL exactly once on the selected task and records the
+rejected request's byte count. It leaves other tasks and unwrapped allocation
+paths unchanged. Fault controls add 12 linked metadata bytes to the original
+meter, excluding alignment/code. The handshake fixture decorates its own
+transport-open callback to arm rejection after successful TCP connect; the
+production candidate and adapter are unchanged.
+
+Creation must return NULL. Setup/handshake must report TLS_ERROR with the exact
+allocation error and stage. Failed I/O must preserve caller output and the
+diagnostic. Each destruction must release all scoped TLS bytes, and the next
+connection must authenticate and exchange exact bytes without an injected fault.
+The peer independently counts the recovery requests and handshake failure alerts.
+
+Both profiles passed 174 checks; a separate uninstrumented smoke run passed ten.
+After warm-up and each of the two failure cycles, RSA free heap was exactly
+336,736 bytes with a 241,664-byte largest block; P-256 was exactly 336,776 with
+a 245,760-byte largest block. All scoped allocations returned to zero. These
+runs rejected 544-byte stream, 16,717-byte setup and 408-byte handshake requests,
+once per point per cycle. There was no observed additional global heap retention
+after these selected failures and recoveries. This does not explain all initial
+runtime storage or establish cleanup for untested allocation sites.
+
+This covers selected one-shot failures, not real heap exhaustion or every
+allocation site. Root parsing, later setup/handshake allocations, DNS/socket/RTOS
+failures, simultaneous sessions and long-run stability remain separate work.
+Global heap observations overlap the scoped totals and require separate review;
+zero tracked bytes does not prove complete cleanup of every runtime allocation.
 
 ## Boundaries
 

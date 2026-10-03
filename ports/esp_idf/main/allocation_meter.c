@@ -16,6 +16,7 @@
 static _Atomic(TaskHandle_t) owner;
 static bool paused;
 static allocation_totals totals;
+static size_t fail_after = SIZE_MAX;
 static struct { void *pointer; size_t bytes; bool crypto; uintptr_t caller; } slots[256];
 
 void *__real_esp_mbedtls_mem_calloc(size_t count, size_t size);
@@ -49,6 +50,23 @@ static void record(void *pointer, size_t count, size_t size, bool crypto, uintpt
     configASSERT(false); /* Tracker exhaustion must fail, never undercount. */
 }
 
+static bool deny(size_t count, size_t size)
+{
+    if (!owned() || paused || fail_after == SIZE_MAX) return false;
+    if (fail_after) { --fail_after; return false; }
+    configASSERT(!size || count <= SIZE_MAX / size);
+    fail_after = SIZE_MAX;
+    ++totals.rejected;
+    totals.rejected_bytes = count * size;
+    return true;
+}
+
+void allocation_meter_fail_after(size_t allowed_calls)
+{
+    configASSERT(owned() && !paused && fail_after == SIZE_MAX);
+    fail_after = allowed_calls;
+}
+
 static void release(void *pointer)
 {
     if (!pointer || !owned()) return;
@@ -66,6 +84,7 @@ static void release(void *pointer)
 
 void *lab_stream_calloc(size_t count, size_t size)
 {
+    if (deny(count, size)) return NULL;
     void *pointer = calloc(count, size);
     record(pointer, count, size, false, (uintptr_t)__builtin_return_address(0));
     return pointer;
@@ -79,6 +98,7 @@ void lab_stream_free(void *pointer)
 
 void *__wrap_esp_mbedtls_mem_calloc(size_t count, size_t size)
 {
+    if (deny(count, size)) return NULL;
     void *pointer = __real_esp_mbedtls_mem_calloc(count, size);
     record(pointer, count, size, true, (uintptr_t)__builtin_return_address(0));
     return pointer;
@@ -96,6 +116,7 @@ void allocation_meter_begin(void)
     memset(slots, 0, sizeof(slots));
     memset(&totals, 0, sizeof(totals));
     paused = false;
+    fail_after = SIZE_MAX;
     atomic_store(&owner, xTaskGetCurrentTaskHandle());
 }
 

@@ -20,6 +20,7 @@ from timing import CHECKS as TIMING_CHECKS, account as timing_account
 from socket_waits import CHECKS as SOCKET_CHECKS, account as socket_account
 from dns_waits import CHECKS as DNS_CHECKS, account as dns_account, serve as dns_serve
 from resources import check_count as resource_checks, account as resource_account
+from allocation_failures import CHECKS as ALLOCATION_CHECKS, account as allocation_account
 
 
 def probe(args):
@@ -37,6 +38,7 @@ def probe(args):
     socket_waits = build.get('suite') == 'socket-waits'
     dns_waits = build.get('suite') == 'dns-waits'
     resources = build.get('suite') == 'memory-accounting'
+    allocations = build.get('suite') == 'allocation-failures'
     rounds = build.get('memory_rounds', 1) if resources else 1
     if resources:
         resource_checks(rounds)
@@ -69,19 +71,25 @@ def probe(args):
         # Keep input open: EOF disconnects QEMU's stdio character backend.
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.PIPE)
         # Read bytes instead of blocking readline, retaining partial panic output.
-        while time.monotonic() - start < (155 * rounds if resources else 60):
+        while time.monotonic() - start < (465 if allocations else 155 * rounds if resources else 60):
             ready, _, _ = select.select([process.stdout], [], [], 0.25)
             if ready:
                 chunk = os.read(process.stdout.fileno(), 65536)
                 if not chunk:
                     break
                 output.extend(chunk)
+                if allocations:
+                    with (directory / 'guest-progress.log').open('ab') as progress:
+                        progress.write(chunk)
+                    if re.search(rb'\nFAIL |assert failed|Guru Meditation', output):
+                        failure = 'Allocation fixture failed; evidence preserved before further attempts'
+                        break
                 if b'main_task: Returned from app_main()' in output:
                     completed = True
                     break
             if process.poll() is not None:
                 break
-        if not completed:
+        if not completed and failure is None:
             failure = 'Guest did not finish within the bounded run'
         if completed and socket_waits:
             # Keep the network stack alive for bounded post-deadline close probes.
@@ -124,9 +132,11 @@ def probe(args):
         accounting = dns_account(text, peers.events)
     if resources:
         accounting = resource_account(text, peers.events, ecdsa, rounds)
-    if authentication or timing or socket_waits or dns_waits or resources:
+    if allocations:
+        accounting = allocation_account(text, peers.events, ecdsa)
+    if authentication or timing or socket_waits or dns_waits or resources or allocations:
         peer_ok = accounting['peer_accounting_passed']
-    expected_checks = resource_checks(rounds) if resources else DNS_CHECKS if dns_waits else SOCKET_CHECKS if socket_waits else TIMING_CHECKS if timing else (CHECKS if authentication else 10)
+    expected_checks = ALLOCATION_CHECKS if allocations else resource_checks(rounds) if resources else DNS_CHECKS if dns_waits else SOCKET_CHECKS if socket_waits else TIMING_CHECKS if timing else (CHECKS if authentication else 10)
     passed = (failure is None and completed and len(summaries) == 1 and summaries[0][:2] == (str(expected_checks), '0')
               and int(summaries[0][2]) > 0 and summaries[0][3] == directory.name
               and len(re.findall(r'^PASS ', text, re.M)) == expected_checks
@@ -139,6 +149,7 @@ def probe(args):
               'socket_waits': accounting if socket_waits else {},
               'dns_waits': accounting if dns_waits else {},
               'resources': accounting if resources else {},
+              'allocations': accounting if allocations else {},
               'peer_accounting_passed': peer_ok, 'checks': int(summaries[0][0]) if len(summaries) == 1 else None,
               'elapsed_seconds': time.monotonic() - start, 'command': command,
               'qemu_sha256': hashlib.sha256(args.qemu.read_bytes()).hexdigest(),
@@ -171,7 +182,8 @@ def main():
     try:
         process = subprocess.run(['runuser', '-u', user, '--', sys.executable, str(Path(__file__).resolve()),
                                   '--child', '--uid', str(args.uid), '--evidence', str(args.evidence.resolve()),
-                                  '--qemu', str(args.qemu.resolve())], timeout=155 * rounds + 25)
+                                  '--qemu', str(args.qemu.resolve())],
+                                 timeout=490 if build.get('suite') == 'allocation-failures' else 155 * rounds + 25)
         return process.returncode
     finally:
         subprocess.run([sys.executable, str(ROOT / 'tools/tap.py'), 'remove'], check=True)

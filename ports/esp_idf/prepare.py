@@ -30,6 +30,7 @@ def main():
     suite.add_argument('--socket-waits', action='store_true', help='Build connection and backpressure cases')
     suite.add_argument('--dns-waits', action='store_true', help='Build bounded DNS ownership cases')
     suite.add_argument('--memory-accounting', choices=('rsa', 'ecdsa'), help='Measure selected allocation and stack costs')
+    suite.add_argument('--allocation-failures', choices=('rsa', 'ecdsa'), help='Inject selected allocation failures and verify recovery')
     parser.add_argument('--memory-rounds', type=int, choices=(1, 3), default=1,
                         help='Repeat resource attempts and natural TCP cleanup in the same boot')
     args = parser.parse_args()
@@ -42,8 +43,8 @@ def main():
     env = os.environ.copy()
     env.update(IDF_PATH=str(args.sdk.resolve()), IDF_TOOLS_PATH=str(args.tools.resolve()))
     report = {'prepared': False, 'commands': [], 'fixture': str(directory),
-              'suite': 'memory-accounting' if args.memory_accounting else 'dns-waits' if args.dns_waits else 'socket-waits' if args.socket_waits else 'timing' if args.timing else ('authentication' if args.authentication else 'smoke'),
-              'profile': args.authentication or args.memory_accounting or 'rsa'}
+              'suite': 'allocation-failures' if args.allocation_failures else 'memory-accounting' if args.memory_accounting else 'dns-waits' if args.dns_waits else 'socket-waits' if args.socket_waits else 'timing' if args.timing else ('authentication' if args.authentication else 'smoke'),
+              'profile': args.authentication or args.memory_accounting or args.allocation_failures or 'rsa'}
     if args.memory_accounting:
         report['memory_rounds'] = args.memory_rounds
 
@@ -70,7 +71,7 @@ def main():
         with zipfile.ZipFile(directory / 'source.zip', 'x', compression=zipfile.ZIP_DEFLATED) as archive:
             for name in manifest:
                 archive.write(ROOT / name, name)
-        if args.authentication or args.memory_accounting:
+        if args.authentication or args.memory_accounting or args.allocation_failures:
             prepare_certificates(directory, report['profile'] == 'ecdsa')
         else:
             make_certificate(directory, 'trusted')
@@ -89,6 +90,8 @@ def main():
             ('#define LAB_TIMING 1\n' if args.timing else '') +
             ('#define LAB_SOCKET_WAITS 1\n' if args.socket_waits else '') +
             ('#define LAB_DNS_WAITS 1\n' if args.dns_waits else '') +
+            ('#define LAB_ALLOCATION_FAILURES 1\n#define LAB_ECDSA ' + str(int(report['profile'] == 'ecdsa')) + '\n'
+             if args.allocation_failures else '') +
             ('#define LAB_MEMORY_ACCOUNTING 1\n#define LAB_ECDSA ' + str(int(report['profile'] == 'ecdsa')) + '\n'
              + '#define LAB_MEMORY_ROUNDS ' + str(args.memory_rounds) + '\n'
              if args.memory_accounting else '') +
@@ -102,7 +105,7 @@ def main():
         report['build_directory'] = str(build)
         run([args.idf_python, args.sdk / 'tools/idf.py', '-B', build,
              '-D', 'IDF_TARGET=esp32s3', '-D', 'SDKCONFIG=' + str(build / 'sdkconfig'),
-             '-D', 'LAB_MEMORY_ACCOUNTING=' + ('ON' if args.memory_accounting else 'OFF'),
+             '-D', 'LAB_MEMORY_ACCOUNTING=' + ('ON' if args.memory_accounting or args.allocation_failures else 'OFF'),
              '-D', 'LAB_FIXTURE_DIR=' + str(directory), 'build'], cwd=ROOT / 'ports/esp_idf')
         run([args.idf_python, '-m', 'esptool', '--chip', 'esp32s3', 'merge_bin',
              '--fill-flash-size', '4MB', '-o', directory / 'flash.bin', '@flash_args'], cwd=build)
