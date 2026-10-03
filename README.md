@@ -603,8 +603,12 @@ exchange, exact bytes, authenticated EOF, socket cleanup and scheduled execution
 Separate RSA and P-256 ECDSA profiles add 83 checks each for wrong-identity and
 wrong-root rejection, missing-clock/entropy failures and recovery on fresh
 connections. A separate 91-check profile covers stalled handshake/read deadlines,
-task-driven cancellation, terminal I/O refusal and fresh-stream recovery. This
-remains partial second-port evidence: DNS, connect/write waits, broader races,
+task-driven cancellation, terminal I/O refusal and fresh-stream recovery. A
+122-check profile adds TCP refusal, observed connect waits, blocked writes and
+cancellation, with a fresh authenticated recovery after each failure. It separates
+local socket release from remote closure: a zero-window peer can ignore the
+initial abort reset, so the fixture records that outcome and checks closure with
+a later peer probe. This remains partial second-port evidence: DNS, broader races,
 certificate/failure cases, target resource budgets and physical hardware
 qualification remain open.
 

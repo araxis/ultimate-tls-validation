@@ -7,6 +7,7 @@ bytes, authenticated EOF, socket cleanup and advancing FreeRTOS ticks. Optional
 RSA and P-256 ECDSA profiles test authentication rejection and recovery. These
 tests do not qualify DNS, wider concurrency, Wi-Fi or physical hardware. A separate
 timing profile covers selected handshake/read deadlines and cancellation.
+A socket-wait profile adds connect refusal, connect waits and blocked writes.
 
 The peer is the existing Python TLS fixture on a private TAP subnet. Certificates
 are generated per build with an IP subject alternative name and independently
@@ -113,10 +114,48 @@ requests and six matching server-name events with the required RSA suite.
 This profile does not cover connect/DNS waits, blocked writes, completion races,
 ECDSA-specific timing, simultaneous connections or task/heap resource budgets.
 
+## Connection waits and blocked writes
+
+Add `--socket-waits` to preparation for a separate RSA profile with 122 checks.
+It is mutually exclusive with the other profiles. Five failure cases each have
+a fresh authenticated recovery: TCP refusal, connect timeout/cancellation, and
+blocked-write timeout/cancellation. The TLS core and socket adapter are unchanged.
+
+A test-only network-output hook counts connection SYNs. It drops only SYNs to
+the selected stall port, while refusal targets an unbound port. Hook installation
+and restoration run on the lwIP core with a completion barrier. Cancellation is
+triggered by an observed SYN or a non-writable socket, followed by five RTOS ticks;
+the worker is joined before releasing its context. Write tests authenticate first,
+wait for a peer-ready byte and send 512-byte chunks to a peer that stops consuming
+data. They require actual backpressure, positive progress below a 256 KiB cap,
+the exact terminal diagnostic, refused later I/O, socket release and recovery.
+
+Connect refusal allows 500 ms. Connect timeout uses 1500 ms; write timeout uses
+4000 ms including the handshake. Deadlines allow 250 ms scheduling tolerance.
+Cancellation must return within 250 ms of its signal and before the 10-second
+overall budget. These are emulator acceptance limits, not hardware guarantees.
+
+The peer independently requires five exact TLS 1.2 RSA exchanges, seven matching
+server-name events and two write stalls with unread ciphertext. It records whether
+closure was observed during the stall. If not, after six seconds it sends a
+one-byte application probe without draining the receive queue, then requires a
+close indication within one second. The runner keeps the idle guest alive for
+this bounded check. Local release and immediate remote notification are distinct:
+an abort reset after a zero-window probe can carry a sequence number ahead of the
+peer's expected value and be ignored. A subsequent peer probe can elicit a valid
+reset from the released endpoint. This test does not promise immediate remote
+closure or reliable delivery of all bytes accepted before failure. See
+[TCP reset validation](https://www.rfc-editor.org/rfc/rfc9293.html#section-3.10.7.4).
+
+The original passive-close failures remain in the local evidence; the corrected
+fixture verifies post-deadline cleanup explicitly. No dependency is patched to
+alter reset behavior. DNS, exhaustive races, ECDSA timing, repeated resource
+retention and target stack/heap budgets remain separate work.
+
 ## Boundaries
 
 The adapter has nonblocking lwIP socket operations with a bounded wait budget.
-Cancellation is tested in the selected handshake/read cases only. DNS ownership
+Cancellation is tested in selected connect, handshake, read and write cases. DNS ownership
 and target-specific locking must be validated separately.
 The app uses IDF's own kernel and network configuration, not the host simulator's
 headers. Its 12 KiB main-task allocation is a test setting, not a proven minimum

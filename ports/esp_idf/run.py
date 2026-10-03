@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT / 'tests'))
 from run_probe import Peers
 from authentication import CHECKS, account
 from timing import CHECKS as TIMING_CHECKS, account as timing_account
+from socket_waits import CHECKS as SOCKET_CHECKS, account as socket_account
 
 
 def probe(args):
@@ -31,6 +32,7 @@ def probe(args):
         raise ValueError('Evidence already contains a run; prepare a new fixture')
     authentication = build.get('suite') == 'authentication'
     timing = build.get('suite') == 'timing'
+    socket_waits = build.get('suite') == 'socket-waits'
     ecdsa = build.get('profile') == 'ecdsa'
     peers = Peers(directory, ecdsa=ecdsa)
     command = [str(args.qemu.resolve()), '-machine', 'esp32s3', '-display', 'none',
@@ -50,6 +52,8 @@ def probe(args):
         if timing:
             peers.listen(socket.SOCK_STREAM, 8446, peers.handshake_stall)
             peers.listen(socket.SOCK_STREAM, 8447, peers.tls, 'trusted', True)
+        if socket_waits:
+            peers.listen(socket.SOCK_STREAM, 8450, peers.write_stall, True, receive_buffer=4096)
         # Keep input open: EOF disconnects QEMU's stdio character backend.
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.PIPE)
         # Read bytes instead of blocking readline, retaining partial panic output.
@@ -67,6 +71,11 @@ def probe(args):
                 break
         if not completed:
             failure = 'Guest did not finish within the bounded run'
+        if completed and socket_waits:
+            # Keep the network stack alive for bounded post-deadline close probes.
+            peer_deadline = time.monotonic() + 8
+            while sum(e['kind'] == 'write-stall' for e in peers.events) < 2 and time.monotonic() < peer_deadline:
+                time.sleep(0.01)
     except Exception as error:
         failure = repr(error)
     finally:
@@ -97,9 +106,11 @@ def probe(args):
     accounting = account(text, peers.events, ecdsa) if authentication else {}
     if timing:
         accounting = timing_account(text, peers.events)
-    if authentication or timing:
+    if socket_waits:
+        accounting = socket_account(text, peers.events)
+    if authentication or timing or socket_waits:
         peer_ok = accounting['peer_accounting_passed']
-    expected_checks = TIMING_CHECKS if timing else (CHECKS if authentication else 10)
+    expected_checks = SOCKET_CHECKS if socket_waits else TIMING_CHECKS if timing else (CHECKS if authentication else 10)
     passed = (failure is None and completed and len(summaries) == 1 and summaries[0][:2] == (str(expected_checks), '0')
               and int(summaries[0][2]) > 0 and summaries[0][3] == directory.name
               and len(re.findall(r'^PASS ', text, re.M)) == expected_checks
@@ -109,6 +120,7 @@ def probe(args):
               'suite': build.get('suite', 'smoke'), 'profile': build.get('profile', 'rsa'),
               'authentication': accounting if authentication else {},
               'timing': accounting if timing else {},
+              'socket_waits': accounting if socket_waits else {},
               'peer_accounting_passed': peer_ok, 'checks': int(summaries[0][0]) if len(summaries) == 1 else None,
               'elapsed_seconds': time.monotonic() - start, 'command': command,
               'qemu_sha256': hashlib.sha256(args.qemu.read_bytes()).hexdigest(),

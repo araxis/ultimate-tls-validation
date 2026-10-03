@@ -187,7 +187,7 @@ class Peers:
             finally:
                 connection.close()
 
-    def write_stall(self, listener):
+    def write_stall(self, listener, probe_close=False):
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.minimum_version = context.maximum_version = ssl.TLSVersion.TLSv1_2
         context.set_ciphers('ECDHE-RSA-AES128-GCM-SHA256')
@@ -215,7 +215,19 @@ class Peers:
                         if any(flags & closed_flags for _, flags in poller.poll(10)):
                             closed = True
                             break
-                    self.record(kind='write-stall', queued_bytes_peak=peak, closed=closed)
+                    observation = {'kind': 'write-stall', 'queued_bytes_peak': peak, 'closed': closed}
+                    if probe_close:
+                        # An abort reset can fall outside a zero receive window.
+                        # After the guest deadline, probe the old connection without
+                        # draining its receive queue; a released endpoint resets it.
+                        observation['closed_before_probe'] = closed
+                        observation['close_probe_sent'] = False
+                        if not closed:
+                            stream.settimeout(1)
+                            stream.sendall(b'\x02')
+                            observation['close_probe_sent'] = True
+                            observation['closed'] = any(flags & closed_flags for _, flags in poller.poll(1000))
+                    self.record(**observation)
             except (OSError, ValueError) as error:
                 self.record(kind='fixture-error', error=str(error))
             finally:
