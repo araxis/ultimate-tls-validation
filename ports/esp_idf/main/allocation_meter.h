@@ -7,6 +7,8 @@ typedef struct {
     unsigned live, allocations;
     unsigned rejected;
     size_t rejected_bytes;
+    unsigned rejected_prior;
+    size_t injection_base_bytes, rejected_live_bytes;
 } allocation_totals;
 void allocation_meter_begin(void);
 void allocation_meter_pause(bool paused);

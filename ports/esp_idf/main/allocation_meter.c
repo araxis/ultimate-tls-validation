@@ -17,6 +17,7 @@ static _Atomic(TaskHandle_t) owner;
 static bool paused;
 static allocation_totals totals;
 static size_t fail_after = SIZE_MAX;
+static unsigned armed_allocations;
 static struct { void *pointer; size_t bytes; bool crypto; uintptr_t caller; } slots[256];
 
 void *__real_esp_mbedtls_mem_calloc(size_t count, size_t size);
@@ -58,6 +59,8 @@ static bool deny(size_t count, size_t size)
     fail_after = SIZE_MAX;
     ++totals.rejected;
     totals.rejected_bytes = count * size;
+    totals.rejected_prior = totals.allocations - armed_allocations;
+    totals.rejected_live_bytes = totals.bytes;
     return true;
 }
 
@@ -65,6 +68,8 @@ void allocation_meter_fail_after(size_t allowed_calls)
 {
     configASSERT(owned() && !paused && fail_after == SIZE_MAX);
     fail_after = allowed_calls;
+    armed_allocations = totals.allocations;
+    totals.injection_base_bytes = totals.bytes;
 }
 
 static void release(void *pointer)

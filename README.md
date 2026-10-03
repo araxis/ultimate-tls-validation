@@ -619,8 +619,9 @@ The [port measurement notes](ports/esp_idf/README.md#scoped-allocation-and-stack
 define these boundaries; they are not whole-device budgets or minimum stack sizes.
 An optional three-round variant repeats work and natural cleanup in the same
 boot (349 checks per certificate profile) to compare warmed heap observations.
-A selected allocation-failure profile adds 174 checks per certificate type for
-stream creation, pre-network setup and post-connect handshake failures, each
+A selected allocation-failure profile adds 336 checks per certificate type for
+stream creation, pre-network setup and post-connect handshake failures, including
+partially allocated record buffers and peer-certificate state. Each failure is
 followed by authenticated recovery and comparison with a warmed baseline.
 This remains partial second-port evidence: broader DNS cases and races,
 certificate/failure cases, target resource budgets and physical hardware

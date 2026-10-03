@@ -292,12 +292,15 @@ all three endpoints, without changing configured stack sizes.
 ## Selected allocation failures and recovery
 
 Prepare with `--allocation-failures rsa` or `--allocation-failures ecdsa`.
-Each separate profile requires 174 checks. It first warms the runtime through an
+Each separate profile requires 336 checks. It first warms the runtime through an
 authenticated exchange and natural TCP cleanup, then repeats two cycles of:
 
 - Rejecting the stream object's allocation before creating a handle.
 - Rejecting the first scoped allocation during TLS setup, before TCP open.
 - Rejecting the first scoped allocation after TCP connects, during the handshake.
+- Rejecting the outgoing record buffer after the incoming buffer exists.
+- Rejecting TLS state initialization after both record buffers exist.
+- Rejecting the peer certificate's DER copy after its chain structure exists.
 
 Every failure is followed by a fresh authenticated exchange. Each cycle ends
 with natural TCP cleanup before taking its global heap comparison. Expect about
@@ -306,9 +309,12 @@ runner with the partial evidence preserved; a failed attempt is never reported
 as a completed suite.
 
 The test meter returns NULL exactly once on the selected task and records the
-rejected request's byte count. It leaves other tasks and unwrapped allocation
-paths unchanged. Fault controls add 12 linked metadata bytes to the original
-meter, excluding alignment/code. The handshake fixture decorates its own
+rejected request's byte count, successful allocations since arming, and live
+bytes at arming and rejection. Later failures must retain earlier allocations
+at the rejection boundary; counting earlier calls alone would not prove this.
+It leaves other tasks and unwrapped allocation paths unchanged. Fault controls
+add 28 linked metadata bytes to the original meter (4,153 total), excluding
+alignment/code. The handshake fixture decorates its own
 transport-open callback to arm rejection after successful TCP connect; the
 production candidate and adapter are unchanged.
 
@@ -316,9 +322,12 @@ Creation must return NULL. Setup/handshake must report TLS_ERROR with the exact
 allocation error and stage. Failed I/O must preserve caller output and the
 diagnostic. Each destruction must release all scoped TLS bytes, and the next
 connection must authenticate and exchange exact bytes without an injected fault.
+The certificate-copy case requires `MBEDTLS_ERR_X509_ALLOC_FAILED`; the other
+setup/handshake cases require `MBEDTLS_ERR_SSL_ALLOC_FAILED`.
 The peer independently counts the recovery requests and handshake failure alerts.
 
-Both profiles passed 174 checks; a separate uninstrumented smoke run passed ten.
+Earlier three-point profiles passed 174 checks each; a separate uninstrumented
+smoke run passed ten.
 After warm-up and each of the two failure cycles, RSA free heap was exactly
 336,736 bytes with a 241,664-byte largest block; P-256 was exactly 336,776 with
 a 245,760-byte largest block. All scoped allocations returned to zero. These
@@ -327,8 +336,23 @@ once per point per cycle. There was no observed additional global heap retention
 after these selected failures and recoveries. This does not explain all initial
 runtime storage or establish cleanup for untested allocation sites.
 
+The expanded six-point profiles passed 336 checks each, plus ten uninstrumented
+smoke checks. The added cases retained 16,717 bytes (incoming buffer), 21,146
+bytes (both buffers) and 408 bytes (certificate structure) above their arming
+baselines when the later allocation failed. Their rejected requests were 4,429,
+220 and 840/444 bytes respectively; the last values match the actual RSA/P-256
+peer certificate DER lengths. All scoped bytes returned to zero after destruction.
+
+In these expanded runs, RSA free heap was 336,732 bytes after warm-up and 336,744
+after each failure cycle. P-256 reported 336,740 at all three endpoints. Largest
+blocks remained 241,664/245,760 bytes; main-task free-stack watermarks remained
+9,076/8,580 bytes, with 2,140 free bytes on the TCP/IP task in both profiles.
+No additional global heap retention was observed at the cleanup endpoints. The
+12-byte RSA increase is not attributed or presented as an optimization. These
+figures describe separate images from the earlier three-point runs.
+
 This covers selected one-shot failures, not real heap exhaustion or every
-allocation site. Root parsing, later setup/handshake allocations, DNS/socket/RTOS
+allocation site. Root parsing, other setup/handshake allocations, DNS/socket/RTOS
 failures, simultaneous sessions and long-run stability remain separate work.
 Global heap observations overlap the scoped totals and require separate review;
 zero tracked bytes does not prove complete cleanup of every runtime allocation.
