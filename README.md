@@ -597,6 +597,12 @@ TLS 1.3, target performance and firmware qualification remain outside this test.
 
 ## Dependency baseline and limits
 
+An additional [ESP32-S3 emulator probe](ports/esp_idf/README.md) builds the same
+TLS source through ESP-IDF 5.3.6. Its first ten checks cover one IP-literal RSA
+exchange, exact bytes, authenticated EOF, socket cleanup and scheduled execution.
+This is initial second-port evidence; authentication failure, cancellation, DNS,
+target resource budgets and physical hardware qualification remain open.
+
 `dependencies.json` pins full commits; bootstrap never patches dependencies.
 lwIP uses Ultimate upstream's `26a2215` pin (reports 2.2.1d). Mbed TLS uses the
 `2b96dd8` revision from the existing HTTPS workflow's ESP-IDF 5.3.6 matrix
@@ -620,7 +626,8 @@ are outside this first exercise.
 
 Known remaining work: broader cancellation/close-notify and deadline races;
 exhaustive handshake and transport/kernel allocation failures; broader malformed-input coverage;
-full socket/heap/queue accounting; broader concurrency; performance budgets; a second port.
+full socket/heap/queue accounting; broader concurrency; performance budgets;
+second-port authentication/failure coverage and target resource accounting.
 The current destroy operation releases the socket with zero linger and does not
 perform a potentially blocking bidirectional TLS shutdown. TCP closing/TIME_WAIT
 state may outlive that socket; platform resource budgets must include it.

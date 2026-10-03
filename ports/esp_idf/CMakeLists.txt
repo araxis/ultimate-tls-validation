@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.20)
+if(NOT DEFINED LAB_FIXTURE_DIR)
+    message(FATAL_ERROR "Use prepare.py to supply a per-run test fixture")
+endif()
+include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+set(COMPONENTS main)
+project(tls_port_probe)
