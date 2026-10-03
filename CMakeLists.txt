@@ -34,7 +34,7 @@ target_link_libraries(tls_stream PUBLIC mbedtls mbedx509 mbedcrypto)
 target_compile_options(tls_stream PRIVATE -Wall -Wextra -Werror -Wpedantic)
 
 add_executable(tls_probe src/probe.c tests/pressure.c tests/connect.c tests/sessions.c tests/security.c
-    tests/allocations.c tests/records.c tests/boundaries.c tests/throughput.c tests/memory.c
+    tests/allocations.c tests/records.c tests/boundaries.c tests/throughput.c tests/memory.c tests/exhaustion.c
     platform/tap_network.c platform/lwip_transport.c platform/lwip_dns.c)
 target_link_options(tls_probe PRIVATE "LINKER:--wrap=calloc" "LINKER:--wrap=free")
 target_include_directories(tls_probe PRIVATE platform tests)

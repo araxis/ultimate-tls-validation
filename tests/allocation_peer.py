@@ -15,7 +15,8 @@ def serve_allocations(peers, listener):
         except socket.timeout:
             continue
         sequence += 1
-        event = dict(kind='allocation-peer', sequence=sequence, confirmed=False, established=False, sni=None)
+        event = dict(kind='allocation-peer', port=listener.getsockname()[1], sequence=sequence,
+                     confirmed=False, established=False, sni=None)
         context.set_servername_callback(lambda stream, host, config: event.update(sni=host))
         connection.settimeout(4)
         try:

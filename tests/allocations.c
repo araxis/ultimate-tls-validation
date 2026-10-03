@@ -11,8 +11,8 @@ void *__real_calloc(size_t count, size_t size);
 void __real_free(void *pointer);
 static _Thread_local struct {
     bool enabled;
-    unsigned attempts, fail_at, injected, live;
-    size_t bytes, peak;
+    unsigned attempts, fail_at, injected, live, rejected;
+    size_t bytes, peak, limit;
     struct { void *pointer; size_t bytes; } slots[256];
 } allocation;
 
@@ -21,11 +21,18 @@ void allocation_measure_begin(void)
     if (allocation.enabled) abort();
     memset(&allocation, 0, sizeof(allocation));
     allocation.enabled = true;
+    allocation.limit = SIZE_MAX;
+}
+
+void allocation_measure_limit(size_t bytes)
+{
+    if (!allocation.enabled) abort();
+    allocation.limit = bytes;
 }
 
 struct allocation_measurement allocation_measure_read(void)
 {
-    return (struct allocation_measurement){allocation.live, allocation.bytes, allocation.peak};
+    return (struct allocation_measurement){allocation.live, allocation.bytes, allocation.peak, allocation.rejected};
 }
 
 struct allocation_measurement allocation_measure_end(void)
@@ -40,6 +47,11 @@ void *__wrap_calloc(size_t count, size_t size)
     if (!allocation.enabled) return __real_calloc(count, size);
     if (++allocation.attempts == allocation.fail_at) {
         ++allocation.injected;
+        return NULL;
+    }
+    if ((size && count > SIZE_MAX / size) || allocation.bytes > allocation.limit ||
+        count * size > allocation.limit - allocation.bytes) {
+        ++allocation.rejected;
         return NULL;
     }
     void *pointer = __real_calloc(count, size);
@@ -88,8 +100,7 @@ static void check(bool passed, const char *label)
 
 static unsigned attempt(const char *ca, unsigned fail_at)
 {
-    memset(&allocation, 0, sizeof(allocation));
-    allocation.enabled = true;
+    allocation_measure_begin();
     allocation.fail_at = fail_at;
     lwip_transport transport;
     int roots = lwip_transport_init(&transport, ca);
@@ -153,9 +164,8 @@ static int arm_handshake(void *context, const char *host, uint16_t port, uint32_
 
 static unsigned handshake_attempt(const char *ca, unsigned fail_at)
 {
-    memset(&allocation, 0, sizeof(allocation));
+    allocation_measure_begin();
     memset(&handshake, 0, sizeof(handshake));
-    allocation.enabled = true;
     handshake.fail_at = fail_at;
     lwip_transport transport;
     int roots = lwip_transport_init(&transport, ca);

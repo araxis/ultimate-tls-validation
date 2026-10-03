@@ -458,8 +458,9 @@ proof covering all process allocations.
 
 Observation overhead is explicit: a semaphore remains allocated for all snapshots,
 the TCP/IP callback occupies one API-message pool slot while capturing counters,
-and allocation-test instrumentation reserves 4,136 thread-local bytes per host
-thread. Pool/list snapshots run in the TCP/IP task under protection. The host
+and the initial allocation-test instrumentation reserved 4,136 thread-local bytes
+per host thread. Later byte-limit instrumentation adds bookkeeping; neither is a
+firmware TLS cost. Pool/list snapshots run in the TCP/IP task under protection. The host
 allocator sample is separate, not a globally simultaneous snapshot. Per-pool
 high-water counters cannot be summed as though all peaks occurred together.
 
@@ -468,6 +469,48 @@ not measure RSS, all OS mappings, actual task-stack peaks, arbitrary queue/load
 peaks or all allocation paths. Target stack/heap headroom, concurrent failure/load
 budgets and another runtime port remain unqualified. The 512-byte staging buffer
 is temporary stack use; it is not an additional persistent TLS heap allocation.
+
+## Resource exhaustion and recovery
+
+```sh
+sudo python3 tools/run_local.py --uid 1000 --binary build/tls_probe --exhaustion
+```
+
+This 81-check suite repeats two cycles of three independent pressure scenarios:
+
+- A sustained allocation-byte limit rejects a second TLS session during setup
+  and then during handshake while the first authenticated session remains live.
+  Destroying the failed session restores the first session's allocation baseline;
+  the first session can still exchange data. Lifting the limit permits recovery.
+- Fixture-owned raw entries fill all eight real lwIP netconn pool slots without
+  consuming the separate TCP PCB pool. A new TLS open reports transport failure;
+  releasing the entries restores capacity and an authenticated exchange succeeds.
+- Fixture allocations consume the real FreeRTOS heap, down to zero available
+  bytes in the measured configuration. Socket receive-mailbox creation then fails.
+  The partial connection and TLS state unwind, and releasing the held memory
+  restores the previous heap and IPC counts before a successful new connection.
+
+Pool/IPC error counters identify which resource actually rejected allocation.
+Snapshots use a pre-existing semaphore and the TCP/IP task; the observer does
+not require a fresh RTOS allocation while the heap is exhausted. The suite does
+not change heap sizes, reset resource counters or accelerate TCP timers. Every
+attempt is bounded, and the Python fixture independently checks successful
+exchanges and expected aborted handshakes on both TLS listeners.
+
+Normal and undefined-behavior-instrumented runs each passed 81 checks. In both,
+TLS setup/handshake ceilings were 49,678/82,972 requested bytes across the two
+sessions. The surviving session retained 41,486 bytes; all tracked bytes were
+released after destruction. FreeRTOS free space returned to 1,735,248 bytes after
+each pressure cycle. Existing allocation, sampled handshake-allocation and
+natural-reclamation accounting suites also passed (76, 294 and 61 checks).
+
+These are reference-port results, not target firmware budgets. TLS limits affect
+direct linked calloc/free calls on the owning test thread, not the host's entire
+allocator. The RTOS test covers receive-mailbox creation failure, not every
+allocation site or semaphore failure after successful mailbox creation. Arbitrary
+fragmentation, larger certificate chains and other concurrent interleavings
+remain unqualified. No runtime TLS implementation change or performance
+improvement is claimed by this test increment.
 
 ## Dependency baseline and limits
 

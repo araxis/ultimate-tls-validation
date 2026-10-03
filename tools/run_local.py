@@ -21,6 +21,7 @@ suite.add_argument('--records', action='store_true')
 suite.add_argument('--boundaries', action='store_true')
 suite.add_argument('--throughput', action='store_true')
 suite.add_argument('--memory', action='store_true')
+suite.add_argument('--exhaustion', action='store_true')
 args = parser.parse_args()
 if os.geteuid() != 0 or args.uid <= 0:
     raise SystemExit('Run setup as root and specify a non-root test user with --uid.')
@@ -53,6 +54,8 @@ try:
         command += ['--throughput']
     if args.memory:
         command += ['--memory']
+    if args.exhaustion:
+        command += ['--exhaustion']
     result = subprocess.run(command, timeout=240 if args.memory else 150)
 finally:
     subprocess.run([sys.executable, str(root / 'tools/tap.py'), 'remove'], check=True)

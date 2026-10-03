@@ -215,7 +215,9 @@ class Peers:
             finally:
                 connection.close()
 
-    def start(self, connections=False, sessions=False, security=False, handshake_allocations=False, records=False, boundaries=False, throughput=False, memory=False):
+    def start(self, connections=False, sessions=False, security=False, handshake_allocations=False, records=False, boundaries=False, throughput=False, memory=False, exhaustion=False):
+        if exhaustion:
+            self.listen(socket.SOCK_STREAM, 8479, lambda listener: serve_allocations(self, listener))
         if memory:
             for slot in range(2):
                 self.listen(socket.SOCK_STREAM, 8477 + slot, lambda listener, slot: serve_memory(self, listener, slot), slot)
@@ -229,7 +231,7 @@ class Peers:
             for port, mode in enumerate(RECORD_MODES, 8465):
                 self.listen(socket.SOCK_STREAM, port,
                             lambda listener, mode: serve_record_fault(self, listener, mode), mode)
-        if handshake_allocations:
+        if handshake_allocations or exhaustion:
             self.listen(socket.SOCK_STREAM, 8464, lambda listener: serve_allocations(self, listener))
         if security:
             for port, mode in ((8461, 'header'), (8462, 'body'), (8463, 'tag')):
@@ -285,6 +287,7 @@ def main():
     suites.add_argument('--boundaries', action='store_true')
     suites.add_argument('--throughput', action='store_true')
     suites.add_argument('--memory', action='store_true')
+    suites.add_argument('--exhaustion', action='store_true')
     args = parser.parse_args()
     directory = ROOT / 'evidence' / datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
     directory.mkdir(parents=True)
@@ -305,7 +308,7 @@ def main():
     try:
         peers.start(connections=args.connections, sessions=args.sessions, security=args.security,
                     handshake_allocations=args.handshake_allocations, records=args.records, boundaries=args.boundaries,
-                    throughput=args.throughput, memory=args.memory)
+                    throughput=args.throughput, memory=args.memory, exhaustion=args.exhaustion)
         command = [str(args.binary.resolve()), 'ult-tls0', str(directory / 'trusted-ca.pem')]
         if args.faults:
             command.append('--faults')
@@ -329,6 +332,8 @@ def main():
             command.append('--throughput')
         if args.memory:
             command.append('--memory')
+        if args.exhaustion:
+            command.append('--exhaustion')
         completed = subprocess.run(command,
                                    text=True, capture_output=True, timeout=210 if args.memory else 75)
         returncode = completed.returncode
@@ -473,12 +478,25 @@ def main():
                    and not alerts and sni == ['tls.lab.test'] * 9 and dns == {'tls.lab.test'}
                    and not any(event['kind'] == 'fixture-error' for event in peers.events))
         expected_checks = 61
+    if args.exhaustion:
+        complete = attempts == ['tls-budget', 'tls-budget-recovery', 'netconn-exhaustion',
+                                'netconn-recovery', 'rtos-exhaustion', 'rtos-recovery'] * 2 + ['exhaustion-recovery']
+        complete = complete and re.findall(r'^EXHAUST_TLS cycle=(\d+) phase=(\d+) ', output, re.MULTILINE) == [
+            ('0', '0'), ('0', '1'), ('1', '0'), ('1', '1')]
+        allocation_events = [event for event in peers.events if event['kind'] == 'allocation-peer']
+        peer_ok = (allocation_accounting([event for event in allocation_events if event['port'] == 8464], [0] * 6)
+                   and allocation_accounting([event for event in allocation_events if event['port'] == 8479], [1, 0] * 2)
+                   and len(allocation_events) == 10
+                   and len(requests) == 1 and requests[0]['exact'] and requests[0]['server'] == 'trusted'
+                   and not alerts and sni == ['tls.lab.test'] and dns == {'tls.lab.test'}
+                   and not any(event['kind'] == 'fixture-error' for event in peers.events))
+        expected_checks = 81
     passed = (returncode == 0 and summary is not None and int(summary[1]) == expected_checks and int(summary[2]) == 0
               and all(int(summary[index]) > 0 for index in (3, 4, 5))
               and complete and peer_ok and failure is None)
     report = {'passed': passed, 'returncode': returncode, 'failure': failure,
               'allocator_tunables': os.environ.get('GLIBC_TUNABLES'),
-              'suite': 'memory' if args.memory else 'throughput' if args.throughput else 'boundaries' if args.boundaries else 'records' if args.records else 'handshake-allocations' if args.handshake_allocations else 'allocations' if args.allocations else 'security' if args.security else 'sessions' if args.sessions else 'connections' if args.connections else 'pressure' if args.pressure else 'wait-faults' if args.faults else 'baseline',
+              'suite': 'exhaustion' if args.exhaustion else 'memory' if args.memory else 'throughput' if args.throughput else 'boundaries' if args.boundaries else 'records' if args.records else 'handshake-allocations' if args.handshake_allocations else 'allocations' if args.allocations else 'security' if args.security else 'sessions' if args.sessions else 'connections' if args.connections else 'pressure' if args.pressure else 'wait-faults' if args.faults else 'baseline',
               'elapsed_seconds': time.monotonic() - start, 'peer_accounting_passed': peer_ok,
               'complete_attempts': complete,
               'checks': int(summary[1]) if summary else None,
