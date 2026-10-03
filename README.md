@@ -366,6 +366,53 @@ wrapper does not exercise a FreeRTOS task or the firmware adapter, and these
 measurements do not qualify another runtime port, hardware entropy, complete
 call-chain stack use, target heap retention or the read copy's execution cost.
 
+## Read-path timing on the reference host
+
+Run the bounded bulk-transfer suite through the existing TAP lifecycle:
+
+```sh
+sudo python3 tools/run_local.py --uid 1000 --binary build/tls_probe --throughput
+python3 tools/prepare_read_comparison.py --baseline 3a7982d51f9ff16f25342810a91c692c047d10e4
+```
+
+The suite transfers eight 2 MiB binary payloads through real FreeRTOS/lwIP/TLS,
+alternating 64-byte and 512-byte application reads. It checks every received
+byte, total length, authenticated EOF, transport cleanup and a recovery request.
+The independent peer accounts for every request and complete payload. The first
+transfer at each read size is a warmup. Instrumented runs check correctness;
+their timings are not performance measurements.
+
+The preparation tool makes isolated source snapshots and optimized builds. Only
+`src/tls_stream.c` differs: the historical pre-staging version versus the current
+candidate. Both use `-O2` with assertions enabled and without sanitizers; dependency
+revisions, compiler commands, source manifests and binary hashes are preserved.
+The historical binary is for successful-read comparison only and retains the
+known cancellation bug. Never install or treat it as a release candidate.
+
+An alternating before/after, after/before, before/after sequence produced 48
+complete transfers (96 MiB including warmups), with nine measured samples per
+read size per implementation. On this x86-64 Linux reference host:
+
+| Read size | Median client-thread CPU before / after per 2 MiB | Median wall time before / after |
+| --- | --- | --- |
+| 64 bytes | 155.70 / 155.58 ms | 1,562.08 / 1,561.32 ms |
+| 512 bytes | 153.75 / 154.65 ms | 1,561.69 / 1,560.75 ms |
+
+For 512-byte reads the observed median CPU increase was about 0.59%; paired run
+changes ranged from +0.30% to +0.94%. For 64-byte reads, paired changes ranged
+from -0.91% to +1.06%. Before/after sample ranges overlap. Wall-time changes were
+below 0.1%; network/scheduler waits dominate this fixture. These results do not
+isolate a precise memcpy cost or prove zero overhead. CPU timing includes payload
+validation and the calling thread's transport work, excludes handshake/setup,
+and does not include the separate lwIP task, peer process or whole-system CPU.
+
+This is an initial host observation, not an ESP32/C64 performance qualification
+or an acceptance threshold. Retain the verified cancellation behavior while
+collecting target task-stack headroom, complete call-chain/interrupt usage,
+target CPU/copy timing and heap measurements. Moving the buffer into the stream
+would trade stack for per-session heap; sharing one global buffer would also
+require a concurrency design. Neither is a demonstrated memory saving.
+
 ## Dependency baseline and limits
 
 `dependencies.json` pins full commits; bootstrap never patches dependencies.

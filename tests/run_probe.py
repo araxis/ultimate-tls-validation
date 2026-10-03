@@ -21,6 +21,7 @@ from record_peer import serve_record_cut
 from allocation_peer import serve_allocations, allocation_accounting
 from record_fault_peer import MODES as RECORD_MODES, serve_record_fault, record_fault_accounting
 from boundary_peer import MODES as BOUNDARY_MODES, serve_boundary, boundary_accounting
+from throughput_peer import serve_throughput, throughput_accounting
 
 ROOT = Path(__file__).resolve().parents[1]
 ADDRESS = '192.0.2.1'
@@ -212,7 +213,9 @@ class Peers:
             finally:
                 connection.close()
 
-    def start(self, connections=False, sessions=False, security=False, handshake_allocations=False, records=False, boundaries=False):
+    def start(self, connections=False, sessions=False, security=False, handshake_allocations=False, records=False, boundaries=False, throughput=False):
+        if throughput:
+            self.listen(socket.SOCK_STREAM, 8476, lambda listener: serve_throughput(self, listener))
         if boundaries:
             for port, mode in enumerate(BOUNDARY_MODES, 8473):
                 self.listen(socket.SOCK_STREAM, port,
@@ -275,6 +278,7 @@ def main():
     suites.add_argument('--handshake-allocations', action='store_true')
     suites.add_argument('--records', action='store_true')
     suites.add_argument('--boundaries', action='store_true')
+    suites.add_argument('--throughput', action='store_true')
     args = parser.parse_args()
     directory = ROOT / 'evidence' / datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
     directory.mkdir(parents=True)
@@ -294,7 +298,8 @@ def main():
     returncode, output, failure = None, '', None
     try:
         peers.start(connections=args.connections, sessions=args.sessions, security=args.security,
-                    handshake_allocations=args.handshake_allocations, records=args.records, boundaries=args.boundaries)
+                    handshake_allocations=args.handshake_allocations, records=args.records, boundaries=args.boundaries,
+                    throughput=args.throughput)
         command = [str(args.binary.resolve()), 'ult-tls0', str(directory / 'trusted-ca.pem')]
         if args.faults:
             command.append('--faults')
@@ -314,6 +319,8 @@ def main():
             command.append('--records')
         if args.boundaries:
             command.append('--boundaries')
+        if args.throughput:
+            command.append('--throughput')
         completed = subprocess.run(command,
                                    text=True, capture_output=True, timeout=75)
         returncode = completed.returncode
@@ -442,11 +449,19 @@ def main():
                    and not alerts and sni == ['tls.lab.test'] * 12 and dns == {'tls.lab.test'}
                    and not any(event['kind'] == 'fixture-error' for event in peers.events))
         expected_checks = 155
+    if args.throughput:
+        indexes = re.findall(r'^RESULT throughput index=(\d+) ', output, re.MULTILINE)
+        complete = indexes == [str(index) for index in range(8)] and attempts == ['throughput'] * 8 + ['throughput-recovery']
+        peer_ok = (throughput_accounting(peers.events)
+                   and len(requests) == 1 and requests[0]['exact'] and requests[0]['server'] == 'trusted'
+                   and not alerts and sni == ['tls.lab.test'] * 9 and dns == {'tls.lab.test'}
+                   and not any(event['kind'] == 'fixture-error' for event in peers.events))
+        expected_checks = 55
     passed = (returncode == 0 and summary is not None and int(summary[1]) == expected_checks and int(summary[2]) == 0
               and all(int(summary[index]) > 0 for index in (3, 4, 5))
               and complete and peer_ok and failure is None)
     report = {'passed': passed, 'returncode': returncode, 'failure': failure,
-              'suite': 'boundaries' if args.boundaries else 'records' if args.records else 'handshake-allocations' if args.handshake_allocations else 'allocations' if args.allocations else 'security' if args.security else 'sessions' if args.sessions else 'connections' if args.connections else 'pressure' if args.pressure else 'wait-faults' if args.faults else 'baseline',
+              'suite': 'throughput' if args.throughput else 'boundaries' if args.boundaries else 'records' if args.records else 'handshake-allocations' if args.handshake_allocations else 'allocations' if args.allocations else 'security' if args.security else 'sessions' if args.sessions else 'connections' if args.connections else 'pressure' if args.pressure else 'wait-faults' if args.faults else 'baseline',
               'elapsed_seconds': time.monotonic() - start, 'peer_accounting_passed': peer_ok,
               'complete_attempts': complete,
               'checks': int(summary[1]) if summary else None,
