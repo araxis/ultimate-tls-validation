@@ -402,6 +402,33 @@ live and confirms the stalled request and closure. A final natural cleanup must
 leave no active/closing TCP records or pending DNS. This is finite two-task
 isolation coverage, not an exhaustive concurrency, heap or hardware claim.
 
+## Bounded same-boot duration
+
+Use `--memory-accounting rsa --duration-seconds 7200` (or `ecdsa`) with
+`prepare.py` to build 60 resource rounds in one boot. Durations must be multiples
+of 120 seconds, through 28,800 seconds; do not combine with `--memory-rounds`.
+Every round includes eight alternating valid/rejected connections and natural
+TCP cleanup, and lasts at least 120 seconds on the guest monotonic clock. Actual
+completion can take longer; the host permits 155 seconds per round plus teardown.
+
+The runner saves `guest-progress.log` while executing. Create `operator.stop`
+inside that run's evidence directory to interrupt it. Partial output and peers
+are retained and the result fails; prepare a fresh fixture for any later retry.
+The marker is a local file and does not control physical hardware.
+
+Duration acceptance additionally requires a single boot, all round markers,
+matching guest/host duration bounds, requested TLS peaks no higher than 32 KiB,
+sampled free heap of at least 295,000 bytes, largest blocks of at least 230,000
+bytes and main/TCP stack reserves of at least 8,000/2,000 bytes. Cooldown free heap
+may vary by at most 128 bytes and end no more than 64 bytes below the first warm
+sample; largest cooldown blocks must not shrink. These fixed local regression
+limits were selected from the earlier three-round observations. They are not
+production budgets, and a pass does not establish whole-device leak freedom.
+
+Run `python3 tests/test_duration.py` for incomplete evidence and resource-limit
+rejection checks. Actual duration evidence must come from a fresh emulator run;
+synthetic acceptance tests are not elapsed-time or hardware validation.
+
 ## Boundaries
 
 The adapter has nonblocking lwIP socket operations with a bounded wait budget.

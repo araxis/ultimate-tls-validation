@@ -16,6 +16,12 @@
 #ifndef LAB_MEMORY_ROUNDS
 #define LAB_MEMORY_ROUNDS 1
 #endif
+#ifndef LAB_DURATION_SECONDS
+#define LAB_DURATION_SECONDS 0
+#endif
+#if LAB_DURATION_SECONDS && (LAB_DURATION_SECONDS != LAB_MEMORY_ROUNDS * 120 || LAB_MEMORY_ROUNDS > 240)
+#error Invalid resource duration configuration
+#endif
 
 typedef struct {
     SemaphoreHandle_t done;
@@ -106,6 +112,10 @@ void resource_probe(bool ready, void (*check)(bool, const char *))
     printf("RESOURCE_CONFIG cycles=%u stack_element=%zu main_stack=%u tcp_stack=%u tracker_capacity=256\n",
            4 * LAB_MEMORY_ROUNDS, sizeof(StackType_t), CONFIG_ESP_MAIN_TASK_STACK_SIZE, TCPIP_THREAD_STACKSIZE);
     check(sizeof(StackType_t) == 1, "stack watermark byte units verified");
+#if LAB_DURATION_SECONDS
+    int64_t duration_start = esp_timer_get_time();
+    int64_t round_start = duration_start;
+#endif
     for (unsigned attempt = 0; attempt < 8 * LAB_MEMORY_ROUNDS; ++attempt) {
         bool rejection = attempt % 2;
         printf("ATTEMPT resource-%u-%s\n", attempt, rejection ? "reject" : "valid");
@@ -140,7 +150,19 @@ void resource_probe(bool ready, void (*check)(bool, const char *))
         vTaskDelay(pdMS_TO_TICKS(500));
         resource_snapshot(attempt, "settled", done, check);
         allocation_meter_end();
-        if ((attempt + 1) % 8 == 0) resource_cooldown(attempt + 1, done, check);
+        if ((attempt + 1) % 8 == 0) {
+            resource_cooldown(attempt + 1, done, check);
+#if LAB_DURATION_SECONDS
+            while (esp_timer_get_time() - round_start < 120000000LL)
+                vTaskDelay(pdMS_TO_TICKS(100));
+            int64_t now = esp_timer_get_time();
+            printf("RESOURCE_ROUND round=%u elapsed_us=%lld total_us=%lld run=%s\n",
+                   (attempt + 1) / 8, (long long)(now - round_start),
+                   (long long)(now - duration_start), LAB_RUN_ID);
+            fflush(stdout);
+            round_start = now;
+#endif
+        }
     }
     vSemaphoreDelete(done);
 }

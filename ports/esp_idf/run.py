@@ -24,6 +24,7 @@ from allocation_failures import CHECKS as ALLOCATION_CHECKS, account as allocati
 from security import CHECKS as SECURITY_CHECKS, account as security_account
 from security_peers import serve_closure
 from sessions import CHECKS as SESSION_CHECKS, account as session_account, stalled_session
+from duration import assess as duration_assess
 
 
 def probe(args):
@@ -45,8 +46,9 @@ def probe(args):
     resources = build.get('suite') == 'memory-accounting'
     allocations = build.get('suite') == 'allocation-failures'
     rounds = build.get('memory_rounds', 1) if resources else 1
+    duration_seconds = build.get('duration_seconds', 0) if resources else 0
     if resources:
-        resource_checks(rounds)
+        resource_checks(rounds, duration_seconds)
     ecdsa = build.get('profile') == 'ecdsa'
     peers = Peers(directory, ecdsa=ecdsa)
     command = [str(args.qemu.resolve()), '-machine', 'esp32s3', '-display', 'none',
@@ -86,13 +88,16 @@ def probe(args):
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.PIPE)
         # Read bytes instead of blocking readline, retaining partial panic output.
         while time.monotonic() - start < (200 if security or sessions else 465 if allocations else 155 * rounds if resources else 60):
+            if (directory / 'operator.stop').exists():
+                failure = 'Operator stopped run; partial evidence retained'
+                break
             ready, _, _ = select.select([process.stdout], [], [], 0.25)
             if ready:
                 chunk = os.read(process.stdout.fileno(), 65536)
                 if not chunk:
                     break
                 output.extend(chunk)
-                if allocations or security or sessions:
+                if allocations or security or sessions or duration_seconds:
                     with (directory / 'guest-progress.log').open('ab') as progress:
                         progress.write(chunk)
                     if re.search(rb'\nFAIL |assert failed|Guru Meditation', output):
@@ -149,16 +154,20 @@ def probe(args):
     if dns_waits:
         accounting = dns_account(text, peers.events)
     if resources:
-        accounting = resource_account(text, peers.events, ecdsa, rounds)
+        accounting = resource_account(text, peers.events, ecdsa, rounds, duration_seconds)
     if allocations:
         accounting = allocation_account(text, peers.events, ecdsa)
     if authentication or timing or socket_waits or dns_waits or resources or allocations or security or sessions:
         peer_ok = accounting['peer_accounting_passed']
-    expected_checks = SESSION_CHECKS if sessions else SECURITY_CHECKS if security else ALLOCATION_CHECKS if allocations else resource_checks(rounds) if resources else DNS_CHECKS if dns_waits else SOCKET_CHECKS if socket_waits else TIMING_CHECKS if timing else (CHECKS if authentication else 10)
+    elapsed_seconds = time.monotonic() - start
+    duration = duration_assess(text, accounting['samples'], duration_seconds, elapsed_seconds, directory.name) if duration_seconds else {}
+    expected_checks = SESSION_CHECKS if sessions else SECURITY_CHECKS if security else ALLOCATION_CHECKS if allocations else resource_checks(rounds, duration_seconds) if resources else DNS_CHECKS if dns_waits else SOCKET_CHECKS if socket_waits else TIMING_CHECKS if timing else (CHECKS if authentication else 10)
     passed = (failure is None and completed and len(summaries) == 1 and summaries[0][:2] == (str(expected_checks), '0')
               and int(summaries[0][2]) > 0 and summaries[0][3] == directory.name
               and len(re.findall(r'^PASS ', text, re.M)) == expected_checks
               and accounting.get('complete_attempts', True)
+              and duration.get('complete_duration', True) and duration.get('resource_limits_passed', True)
+              and text.count('ESP-ROM:esp32s3-20210327') == 1
               and not re.search(r'^FAIL|Guru Meditation|assert failed|abort\(\) was called', text, re.M) and peer_ok)
     report = {'passed': passed, 'guest_completed': completed, 'failure': failure,
               'suite': build.get('suite', 'smoke'), 'profile': build.get('profile', 'rsa'),
@@ -170,8 +179,9 @@ def probe(args):
               'allocations': accounting if allocations else {},
               'security': accounting if security else {},
               'sessions': accounting if sessions else {},
+              'duration': duration,
               'peer_accounting_passed': peer_ok, 'checks': int(summaries[0][0]) if len(summaries) == 1 else None,
-              'elapsed_seconds': time.monotonic() - start, 'command': command,
+              'elapsed_seconds': elapsed_seconds, 'command': command,
               'qemu_sha256': hashlib.sha256(args.qemu.read_bytes()).hexdigest(),
               'image_sha256': hashlib.sha256((directory / 'flash.bin').read_bytes()).hexdigest(),
               'scope': 'Finite selected cases under ESP32-S3 emulation; no exhaustive races, target accounting or hardware qualification'}
@@ -197,7 +207,7 @@ def main():
     user = pwd.getpwuid(args.uid).pw_name
     build = json.loads((args.evidence / 'build-result.json').read_text())
     rounds = build.get('memory_rounds', 1) if build.get('suite') == 'memory-accounting' else 1
-    resource_checks(rounds)
+    resource_checks(rounds, build.get('duration_seconds', 0))
     subprocess.run([sys.executable, str(ROOT / 'tools/tap.py'), 'create', '--uid', str(args.uid)], check=True)
     try:
         process = subprocess.run(['runuser', '-u', user, '--', sys.executable, str(Path(__file__).resolve()),

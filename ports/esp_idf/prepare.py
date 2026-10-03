@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT / 'tests'))
 from run_probe import make_certificate
 from authentication import prepare_certificates
 from security import prepare as prepare_security
+from duration import rounds_for
 
 
 def main():
@@ -36,9 +37,18 @@ def main():
     suite.add_argument('--allocation-failures', choices=('rsa', 'ecdsa'), help='Inject selected allocation failures and verify recovery')
     parser.add_argument('--memory-rounds', type=int, choices=(1, 3), default=1,
                         help='Repeat resource attempts and natural TCP cleanup in the same boot')
+    parser.add_argument('--duration-seconds', type=int, default=0,
+                        help='Resource duration in multiples of 120 seconds, up to 28800')
     args = parser.parse_args()
     if args.memory_rounds != 1 and not args.memory_accounting:
         parser.error('--memory-rounds requires --memory-accounting')
+    if args.duration_seconds:
+        if not args.memory_accounting or args.memory_rounds != 1:
+            parser.error('--duration-seconds requires --memory-accounting and cannot combine with --memory-rounds')
+        try:
+            args.memory_rounds = rounds_for(args.duration_seconds)
+        except ValueError as error:
+            parser.error(str(error))
     if os.geteuid() == 0:
         parser.error('Build as a normal user; only run.py performs privileged TAP setup.')
     directory = ROOT / 'evidence' / ('esp32-' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ'))
@@ -50,6 +60,7 @@ def main():
               'profile': args.authentication or args.memory_accounting or args.allocation_failures or 'rsa'}
     if args.memory_accounting:
         report['memory_rounds'] = args.memory_rounds
+        report['duration_seconds'] = args.duration_seconds
 
     def run(command, cwd=ROOT, timeout=600):
         result = subprocess.run(list(map(str, command)), cwd=cwd, env=env,
@@ -101,6 +112,7 @@ def main():
              if args.allocation_failures else '') +
             ('#define LAB_MEMORY_ACCOUNTING 1\n#define LAB_ECDSA ' + str(int(report['profile'] == 'ecdsa')) + '\n'
              + '#define LAB_MEMORY_ROUNDS ' + str(args.memory_rounds) + '\n'
+             + '#define LAB_DURATION_SECONDS ' + str(args.duration_seconds) + '\n'
              if args.memory_accounting else '') +
             ('#define LAB_AUTHENTICATION 1\n#define LAB_ECDSA ' + str(int(args.authentication == 'ecdsa')) + '\n'
              if args.authentication else '') +
