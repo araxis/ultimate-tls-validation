@@ -19,6 +19,7 @@ from authentication import CHECKS, account
 from timing import CHECKS as TIMING_CHECKS, account as timing_account
 from socket_waits import CHECKS as SOCKET_CHECKS, account as socket_account
 from dns_waits import CHECKS as DNS_CHECKS, account as dns_account, serve as dns_serve
+from resources import CHECKS as RESOURCE_CHECKS, account as resource_account
 
 
 def probe(args):
@@ -35,6 +36,7 @@ def probe(args):
     timing = build.get('suite') == 'timing'
     socket_waits = build.get('suite') == 'socket-waits'
     dns_waits = build.get('suite') == 'dns-waits'
+    resources = build.get('suite') == 'memory-accounting'
     ecdsa = build.get('profile') == 'ecdsa'
     peers = Peers(directory, ecdsa=ecdsa)
     command = [str(args.qemu.resolve()), '-machine', 'esp32s3', '-display', 'none',
@@ -51,6 +53,8 @@ def probe(args):
         if authentication:
             peers.listen(socket.SOCK_STREAM, 8444, peers.tls, 'wrong-host')
             peers.listen(socket.SOCK_STREAM, 8445, peers.tls, 'untrusted')
+        if resources:
+            peers.listen(socket.SOCK_STREAM, 8444, peers.tls, 'wrong-host')
         if timing:
             peers.listen(socket.SOCK_STREAM, 8446, peers.handshake_stall)
             peers.listen(socket.SOCK_STREAM, 8447, peers.tls, 'trusted', True)
@@ -62,7 +66,7 @@ def probe(args):
         # Keep input open: EOF disconnects QEMU's stdio character backend.
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.PIPE)
         # Read bytes instead of blocking readline, retaining partial panic output.
-        while time.monotonic() - start < 60:
+        while time.monotonic() - start < (155 if resources else 60):
             ready, _, _ = select.select([process.stdout], [], [], 0.25)
             if ready:
                 chunk = os.read(process.stdout.fileno(), 65536)
@@ -115,9 +119,11 @@ def probe(args):
         accounting = socket_account(text, peers.events)
     if dns_waits:
         accounting = dns_account(text, peers.events)
-    if authentication or timing or socket_waits or dns_waits:
+    if resources:
+        accounting = resource_account(text, peers.events, ecdsa)
+    if authentication or timing or socket_waits or dns_waits or resources:
         peer_ok = accounting['peer_accounting_passed']
-    expected_checks = DNS_CHECKS if dns_waits else SOCKET_CHECKS if socket_waits else TIMING_CHECKS if timing else (CHECKS if authentication else 10)
+    expected_checks = RESOURCE_CHECKS if resources else DNS_CHECKS if dns_waits else SOCKET_CHECKS if socket_waits else TIMING_CHECKS if timing else (CHECKS if authentication else 10)
     passed = (failure is None and completed and len(summaries) == 1 and summaries[0][:2] == (str(expected_checks), '0')
               and int(summaries[0][2]) > 0 and summaries[0][3] == directory.name
               and len(re.findall(r'^PASS ', text, re.M)) == expected_checks
@@ -129,6 +135,7 @@ def probe(args):
               'timing': accounting if timing else {},
               'socket_waits': accounting if socket_waits else {},
               'dns_waits': accounting if dns_waits else {},
+              'resources': accounting if resources else {},
               'peer_accounting_passed': peer_ok, 'checks': int(summaries[0][0]) if len(summaries) == 1 else None,
               'elapsed_seconds': time.monotonic() - start, 'command': command,
               'qemu_sha256': hashlib.sha256(args.qemu.read_bytes()).hexdigest(),
@@ -158,7 +165,7 @@ def main():
     try:
         process = subprocess.run(['runuser', '-u', user, '--', sys.executable, str(Path(__file__).resolve()),
                                   '--child', '--uid', str(args.uid), '--evidence', str(args.evidence.resolve()),
-                                  '--qemu', str(args.qemu.resolve())], timeout=85)
+                                  '--qemu', str(args.qemu.resolve())], timeout=180)
         return process.returncode
     finally:
         subprocess.run([sys.executable, str(ROOT / 'tools/tap.py'), 'remove'], check=True)

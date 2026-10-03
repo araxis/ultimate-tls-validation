@@ -4,6 +4,7 @@
 #include "timing.h"
 #include "socket_waits.h"
 #include "dns_waits.h"
+#include "resource_probe.h"
 #include "esp_eth.h"
 #include "esp_event.h"
 #include "esp_netif.h"
@@ -79,7 +80,9 @@ void app_main(void)
     struct timeval utc = {.tv_sec = LAB_UTC_SECONDS, .tv_usec = 0};
     bool clock_ready = settimeofday(&utc, NULL) == 0;
     check(clock_ready, "fixture UTC installed");
-#if defined(LAB_DNS_WAITS)
+#if defined(LAB_MEMORY_ACCOUNTING)
+    resource_probe(connected && clock_ready, check);
+#elif defined(LAB_DNS_WAITS)
     dns_waits_probe(connected && clock_ready, check);
 #elif defined(LAB_SOCKET_WAITS)
     socket_waits_probe(connected && clock_ready, check);

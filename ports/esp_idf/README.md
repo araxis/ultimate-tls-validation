@@ -10,6 +10,8 @@ tests do not qualify wider concurrency, Wi-Fi or physical hardware. A separate
 timing profile covers selected handshake/read deadlines and cancellation.
 A socket-wait profile adds connect refusal, connect waits and blocked writes.
 A DNS profile exercises lookup lifetime, cancellation, capacity and recovery.
+A resource profile measures scoped allocations, global heap and observed task
+stack headroom for successful and rejected RSA/P-256 connections.
 
 The peer is the existing Python TLS fixture on a private TAP subnet. Certificates
 are generated per build with an IP subject alternative name and independently
@@ -195,11 +197,74 @@ malformed replies, simultaneous callers, all resolver/core-queue races and natur
 retry exhaustion are not newly qualified on ESP-IDF. A retained slot is bounded
 state, not proof that all DNS/kernel allocations have been measured or freed.
 
+## Scoped allocation and stack measurements
+
+Add `--memory-accounting rsa` or `--memory-accounting ecdsa` to preparation.
+Each separate profile requires 119 checks across four valid exchanges and four
+wrong-identity rejections. It captures allocation, internal-heap, stack and TCP
+state before setup, after root parsing, stream creation, open, destruction and
+a 500 ms settling interval. At the end it waits up to 135 seconds for natural
+TCP timer expiry. Neither timers nor allocation counters are reset to make
+retained state disappear. Expect roughly two minutes per run.
+
+Only this profile compiles the stream's allocation calls through a test meter
+and wraps ESP-IDF's Mbed TLS allocator. Both forward to the unchanged allocators.
+The verified SDK configuration uses internal 8-bit heap allocation. The meter
+counts requested bytes on the main task; it excludes allocator metadata, other
+tasks and unwrapped paths. Its 256-entry registry fails on overflow instead of
+under-counting. Metadata occupies 4,125 bytes of linked symbols, excluding
+alignment and code. The ordinary DNS regression verifies that these wrappers
+and the resource probe are absent from its linked image.
+
+Observed with ESP-IDF 5.3.6, 16,384-byte incoming and 4,096-byte outgoing TLS
+buffers, directly signed RSA-2048 or P-256 certificates:
+
+| Measurement (bytes) | RSA | P-256 ECDSA |
+| --- | ---: | ---: |
+| Tracked live allocation after successful open | 26,397 | 24,716 |
+| Tracked successful-attempt allocation peak | 29,761 | 27,688-27,692 |
+| Tracked rejected-attempt allocation peak | 29,457 | 27,635 |
+| Stream object, already included above | 544 | 544 |
+| Minimum observed main-task stack free / configured | 9,564 / 12,288 | 8,956 / 12,288 |
+| Minimum observed TCP/IP-task stack free / configured | 2,132 / 3,584 | 2,164 / 3,584 |
+
+All tracked allocations returned to zero after each destruction. TCP closing
+records accumulated to four `TIME_WAIT` entries, then expired naturally. Global
+internal heap free space rose from 335,900 to 336,768 bytes during RSA cooldown
+and from 335,916 to 336,784 during ECDSA cooldown. Both cold baselines were
+337,436 bytes; the remaining 668/652-byte cold-to-warm difference is not fully
+attributed. Largest free blocks also remained below their cold values. These
+observations do not prove complete heap recovery or long-run leak freedom.
+
+Global heap includes the scoped TLS allocations, so do not add the two measures.
+Its minimum-free figure is cumulative since boot, not an isolated TLS peak.
+Snapshots are sequential, not globally atomic. Stack high-water marks use this
+port's one-byte `StackType_t` and include the fixture and observation callbacks;
+they are not minimum-safe stack sizes or hardware headroom guarantees.
+
+The shared four-entry DNS pool occupies 1,152 linked bytes plus an 8-byte lock.
+It is static storage, separate from dynamic heap observations. The embedded
+test root occupies 1,156 RSA or 620 ECDSA bytes in read-only storage; its parsed
+heap representation is already included in the tracked totals. The snapshot
+semaphore is allocated before baseline and reused; this is measurement overhead.
+
+An earlier broad allocator wrapper captured a four-byte allocation retained by
+`pthread_setspecific` beyond an individual connection and failed the zero-live
+assertion. The saved ELF attributes its caller to SDK thread-local list storage.
+The final meter therefore labels only stream and Mbed TLS requests as TLS
+allocations; global heap observations still include runtime costs. This narrows
+attribution rather than claiming that all runtime storage has been freed.
+
+This profile measures selected single-session paths. Wider concurrency, larger
+or mixed certificate chains, allocation-failure recovery, interrupt stack use,
+Wi-Fi, whole-firmware budgets and physical CPU/stack/heap behavior remain open.
+No memory optimization or performance improvement is claimed by this increment.
+
 ## Boundaries
 
 The adapter has nonblocking lwIP socket operations with a bounded wait budget.
 Cancellation is tested in selected DNS, connect, handshake, read and write cases.
-Wider concurrency and target resource accounting remain separate validation.
+Wider concurrency and complete target resource accounting remain separate validation.
 The app uses IDF's own kernel and network configuration, not the host simulator's
 headers. Its 12 KiB main-task allocation is a test setting, not a proven minimum
 stack size. No total heap, leak-freedom, hardware timing or device headroom claim

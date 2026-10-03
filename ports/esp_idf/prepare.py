@@ -29,6 +29,7 @@ def main():
     suite.add_argument('--timing', action='store_true', help='Build handshake/read deadline and cancellation cases')
     suite.add_argument('--socket-waits', action='store_true', help='Build connection and backpressure cases')
     suite.add_argument('--dns-waits', action='store_true', help='Build bounded DNS ownership cases')
+    suite.add_argument('--memory-accounting', choices=('rsa', 'ecdsa'), help='Measure selected allocation and stack costs')
     args = parser.parse_args()
     if os.geteuid() == 0:
         parser.error('Build as a normal user; only run.py performs privileged TAP setup.')
@@ -37,8 +38,8 @@ def main():
     env = os.environ.copy()
     env.update(IDF_PATH=str(args.sdk.resolve()), IDF_TOOLS_PATH=str(args.tools.resolve()))
     report = {'prepared': False, 'commands': [], 'fixture': str(directory),
-              'suite': 'dns-waits' if args.dns_waits else 'socket-waits' if args.socket_waits else 'timing' if args.timing else ('authentication' if args.authentication else 'smoke'),
-              'profile': args.authentication or 'rsa'}
+              'suite': 'memory-accounting' if args.memory_accounting else 'dns-waits' if args.dns_waits else 'socket-waits' if args.socket_waits else 'timing' if args.timing else ('authentication' if args.authentication else 'smoke'),
+              'profile': args.authentication or args.memory_accounting or 'rsa'}
 
     def run(command, cwd=ROOT, timeout=600):
         result = subprocess.run(list(map(str, command)), cwd=cwd, env=env,
@@ -63,8 +64,8 @@ def main():
         with zipfile.ZipFile(directory / 'source.zip', 'x', compression=zipfile.ZIP_DEFLATED) as archive:
             for name in manifest:
                 archive.write(ROOT / name, name)
-        if args.authentication:
-            prepare_certificates(directory, args.authentication == 'ecdsa')
+        if args.authentication or args.memory_accounting:
+            prepare_certificates(directory, report['profile'] == 'ecdsa')
         else:
             make_certificate(directory, 'trusted')
             extension = directory / 'trusted.ext'
@@ -82,6 +83,8 @@ def main():
             ('#define LAB_TIMING 1\n' if args.timing else '') +
             ('#define LAB_SOCKET_WAITS 1\n' if args.socket_waits else '') +
             ('#define LAB_DNS_WAITS 1\n' if args.dns_waits else '') +
+            ('#define LAB_MEMORY_ACCOUNTING 1\n#define LAB_ECDSA ' + str(int(report['profile'] == 'ecdsa')) + '\n'
+             if args.memory_accounting else '') +
             ('#define LAB_AUTHENTICATION 1\n#define LAB_ECDSA ' + str(int(args.authentication == 'ecdsa')) + '\n'
              if args.authentication else '') +
             'static const unsigned char lab_root[] = ' + json.dumps(root) + ';\n')
@@ -92,6 +95,7 @@ def main():
         report['build_directory'] = str(build)
         run([args.idf_python, args.sdk / 'tools/idf.py', '-B', build,
              '-D', 'IDF_TARGET=esp32s3', '-D', 'SDKCONFIG=' + str(build / 'sdkconfig'),
+             '-D', 'LAB_MEMORY_ACCOUNTING=' + ('ON' if args.memory_accounting else 'OFF'),
              '-D', 'LAB_FIXTURE_DIR=' + str(directory), 'build'], cwd=ROOT / 'ports/esp_idf')
         run([args.idf_python, '-m', 'esptool', '--chip', 'esp32s3', 'merge_bin',
              '--fill-flash-size', '4MB', '-o', directory / 'flash.bin', '@flash_args'], cwd=build)

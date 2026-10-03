@@ -611,6 +611,12 @@ initial abort reset, so the fixture records that outcome and checks closure with
 a later peer probe. A 154-check DNS profile reuses the bounded resolver, verifies
 late-callback ownership and four-slot exhaustion/reuse, preserves hostname
 authentication, and checks that resolution consumes the overall handshake budget.
+A separate resource profile adds 119 checks for each RSA/P-256 configuration.
+Scoped allocation requests return to zero after each of eight attempts; natural
+TCP cleanup is observed separately from the remaining global cold-to-warm heap
+difference. It also records static storage and main/TCP/IP-task stack watermarks.
+The [port measurement notes](ports/esp_idf/README.md#scoped-allocation-and-stack-measurements)
+define these boundaries; they are not whole-device budgets or minimum stack sizes.
 This remains partial second-port evidence: broader DNS cases and races,
 certificate/failure cases, target resource budgets and physical hardware
 qualification remain open.
