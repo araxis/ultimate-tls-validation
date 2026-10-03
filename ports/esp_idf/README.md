@@ -260,6 +260,35 @@ or mixed certificate chains, allocation-failure recovery, interrupt stack use,
 Wi-Fi, whole-firmware budgets and physical CPU/stack/heap behavior remain open.
 No memory optimization or performance improvement is claimed by this increment.
 
+### Repeated warm-baseline comparison
+
+Add `--memory-rounds 3` alongside `--memory-accounting rsa` or
+`--memory-accounting ecdsa` to repeat the eight attempts and natural cooldown
+three times in the same boot. This variant requires 349 checks per profile and
+takes approximately six minutes. The first post-cleanup snapshot establishes
+the warmed reference; the next two allow comparison after the same work and
+cleanup. No task, networking stack or emulator restart occurs between rounds.
+The existing one-round command still requires 119 checks.
+
+All rounds require zero tracked TLS allocations, zero active/TIME_WAIT TCP
+records and no pending DNS at cleanup. Global free heap and largest-free-block
+values are reported separately without imposing an arbitrary equality tolerance.
+Passing these functional and cleanup checks alone does not mean that global
+memory is stable: the post-cleanup measurements must also be examined. Three
+rounds distinguish selected cold/warm behavior but do not replace a long soak or
+attribute all retained runtime allocations.
+
+In the initial three-round runs, post-cleanup free heap was exactly 336,744 bytes
+after every RSA round and 336,760 after every P-256 round. Largest free blocks
+were also unchanged across the three endpoints: 241,664 and 245,760 bytes,
+respectively. Each profile completed 24 attempts; all scoped allocations returned
+to zero after each attempt. There was no further heap loss across the two warmed
+repeats in these runs. Cold-to-warm differences were 692/676 bytes and remain
+not fully attributed. These are separate fixtures from the one-round measurements
+above; compare endpoints within each run rather than treating small differences
+between separate images as a retention trend. Stack watermarks were stable at
+all three endpoints, without changing configured stack sizes.
+
 ## Boundaries
 
 The adapter has nonblocking lwIP socket operations with a bounded wait budget.

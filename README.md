@@ -617,6 +617,8 @@ TCP cleanup is observed separately from the remaining global cold-to-warm heap
 difference. It also records static storage and main/TCP/IP-task stack watermarks.
 The [port measurement notes](ports/esp_idf/README.md#scoped-allocation-and-stack-measurements)
 define these boundaries; they are not whole-device budgets or minimum stack sizes.
+An optional three-round variant repeats work and natural cleanup in the same
+boot (349 checks per certificate profile) to compare warmed heap observations.
 This remains partial second-port evidence: broader DNS cases and races,
 certificate/failure cases, target resource budgets and physical hardware
 qualification remain open.

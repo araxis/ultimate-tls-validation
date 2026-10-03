@@ -19,7 +19,7 @@ from authentication import CHECKS, account
 from timing import CHECKS as TIMING_CHECKS, account as timing_account
 from socket_waits import CHECKS as SOCKET_CHECKS, account as socket_account
 from dns_waits import CHECKS as DNS_CHECKS, account as dns_account, serve as dns_serve
-from resources import CHECKS as RESOURCE_CHECKS, account as resource_account
+from resources import check_count as resource_checks, account as resource_account
 
 
 def probe(args):
@@ -37,6 +37,9 @@ def probe(args):
     socket_waits = build.get('suite') == 'socket-waits'
     dns_waits = build.get('suite') == 'dns-waits'
     resources = build.get('suite') == 'memory-accounting'
+    rounds = build.get('memory_rounds', 1) if resources else 1
+    if resources:
+        resource_checks(rounds)
     ecdsa = build.get('profile') == 'ecdsa'
     peers = Peers(directory, ecdsa=ecdsa)
     command = [str(args.qemu.resolve()), '-machine', 'esp32s3', '-display', 'none',
@@ -66,7 +69,7 @@ def probe(args):
         # Keep input open: EOF disconnects QEMU's stdio character backend.
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.PIPE)
         # Read bytes instead of blocking readline, retaining partial panic output.
-        while time.monotonic() - start < (155 if resources else 60):
+        while time.monotonic() - start < (155 * rounds if resources else 60):
             ready, _, _ = select.select([process.stdout], [], [], 0.25)
             if ready:
                 chunk = os.read(process.stdout.fileno(), 65536)
@@ -120,10 +123,10 @@ def probe(args):
     if dns_waits:
         accounting = dns_account(text, peers.events)
     if resources:
-        accounting = resource_account(text, peers.events, ecdsa)
+        accounting = resource_account(text, peers.events, ecdsa, rounds)
     if authentication or timing or socket_waits or dns_waits or resources:
         peer_ok = accounting['peer_accounting_passed']
-    expected_checks = RESOURCE_CHECKS if resources else DNS_CHECKS if dns_waits else SOCKET_CHECKS if socket_waits else TIMING_CHECKS if timing else (CHECKS if authentication else 10)
+    expected_checks = resource_checks(rounds) if resources else DNS_CHECKS if dns_waits else SOCKET_CHECKS if socket_waits else TIMING_CHECKS if timing else (CHECKS if authentication else 10)
     passed = (failure is None and completed and len(summaries) == 1 and summaries[0][:2] == (str(expected_checks), '0')
               and int(summaries[0][2]) > 0 and summaries[0][3] == directory.name
               and len(re.findall(r'^PASS ', text, re.M)) == expected_checks
@@ -161,11 +164,14 @@ def main():
     if os.geteuid() != 0 or args.uid <= 0:
         parser.error('Run TAP setup as root with a non-root --uid')
     user = pwd.getpwuid(args.uid).pw_name
+    build = json.loads((args.evidence / 'build-result.json').read_text())
+    rounds = build.get('memory_rounds', 1) if build.get('suite') == 'memory-accounting' else 1
+    resource_checks(rounds)
     subprocess.run([sys.executable, str(ROOT / 'tools/tap.py'), 'create', '--uid', str(args.uid)], check=True)
     try:
         process = subprocess.run(['runuser', '-u', user, '--', sys.executable, str(Path(__file__).resolve()),
                                   '--child', '--uid', str(args.uid), '--evidence', str(args.evidence.resolve()),
-                                  '--qemu', str(args.qemu.resolve())], timeout=180)
+                                  '--qemu', str(args.qemu.resolve())], timeout=155 * rounds + 25)
         return process.returncode
     finally:
         subprocess.run([sys.executable, str(ROOT / 'tools/tap.py'), 'remove'], check=True)

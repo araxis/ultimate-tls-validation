@@ -8,14 +8,25 @@ FIELDS = ['requested', 'peak', 'core', 'crypto', 'live', 'allocations', 'free', 
           'main_stack_free', 'tcp_stack_free', 'active', 'timewait', 'dns']
 
 
-def account(output, events, ecdsa):
-    labels = ['resource-%d-%s' % (i, 'reject' if i % 2 else 'valid') for i in range(8)]
+def check_count(rounds):
+    if rounds not in (1, 3):
+        raise ValueError('Resource rounds must be 1 or 3')
+    return CHECKS + (rounds - 1) * 115
+
+
+def account(output, events, ecdsa, rounds=1):
+    check_count(rounds)
+    labels = ['resource-%d-%s' % (i, 'reject' if i % 2 else 'valid') for i in range(8 * rounds)]
+    expected = []
+    for start in range(0, 8 * rounds, 8):
+        expected.extend((i, p) for i in range(start, start + 8) for p in PHASES)
+        expected.extend([(start + 8, 'cooldown-start'), (start + 8, 'cooldown-end')])
     rows = re.findall(r'^RESOURCE_RESULT attempt=(\d+) status=(\d+) stage=(\d+) code=(-?\d+) verify=(\d+) opens=(\d+)\r?$', output, re.M)
     config = re.findall(r'^RESOURCE_CONFIG cycles=(\d+) stack_element=(\d+) main_stack=(\d+) tcp_stack=(\d+) tracker_capacity=(\d+)\r?$', output, re.M)
     measurements = re.findall(r'^RESOURCE attempt=(\d+) phase=([a-z-]+) ' + ' '.join(k + r'=(\d+)' for k in FIELDS) + r'\r?$', output, re.M)
-    complete = (re.findall(r'^ATTEMPT ([a-z0-9-]+)\r?$', output, re.M) == labels and len(rows) == 8 and
-                len(config) == 1 and config[0][0:3] == ('4', '1', '12288') and config[0][4] == '256' and
-                [(int(r[0]), r[1]) for r in measurements] == [(i, p) for i in range(8) for p in PHASES] + [(8, 'cooldown-start'), (8, 'cooldown-end')])
+    complete = (re.findall(r'^ATTEMPT ([a-z0-9-]+)\r?$', output, re.M) == labels and len(rows) == 8 * rounds and
+                len(config) == 1 and config[0][0:3] == (str(4 * rounds), '1', '12288') and config[0][4] == '256' and
+                [(int(r[0]), r[1]) for r in measurements] == expected)
     for i, row in enumerate(rows):
         complete = complete and tuple(map(int, row)) == ((i, 5, 8, -9984, 4, 1) if i % 2 else (i, 0, 8, 0, 0, 1))
     samples = []
@@ -41,9 +52,9 @@ def account(output, events, ecdsa):
             complete = complete and values['active'] == values['timewait'] == 0
     kinds = Counter(e['kind'] for e in events)
     cipher = 'ECDHE-ECDSA-AES128-GCM-SHA256' if ecdsa else 'ECDHE-RSA-AES128-GCM-SHA256'
-    peer_ok = (kinds == Counter({'sni': 8, 'request': 4, 'tls-alert': 4}) and
+    peer_ok = (kinds == Counter({'sni': 8 * rounds, 'request': 4 * rounds, 'tls-alert': 4 * rounds}) and
                all(e['name'] == '192.0.2.1' for e in events if e['kind'] == 'sni') and
-               Counter(e['server'] for e in events if e['kind'] == 'sni') == Counter({'trusted': 4, 'wrong-host': 4}) and
+               Counter(e['server'] for e in events if e['kind'] == 'sni') == Counter({'trusted': 4 * rounds, 'wrong-host': 4 * rounds}) and
                all(e['server'] == 'trusted' and e['exact'] and e['protocol'] == 'TLSv1.2' and e['cipher'] == cipher for e in events if e['kind'] == 'request') and
                all(e['server'] == 'wrong-host' and e['reason'] == 'SSLV3_ALERT_BAD_CERTIFICATE' for e in events if e['kind'] == 'tls-alert'))
     return {'complete_attempts': bool(complete), 'peer_accounting_passed': peer_ok,

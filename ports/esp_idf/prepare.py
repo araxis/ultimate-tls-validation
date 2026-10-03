@@ -30,7 +30,11 @@ def main():
     suite.add_argument('--socket-waits', action='store_true', help='Build connection and backpressure cases')
     suite.add_argument('--dns-waits', action='store_true', help='Build bounded DNS ownership cases')
     suite.add_argument('--memory-accounting', choices=('rsa', 'ecdsa'), help='Measure selected allocation and stack costs')
+    parser.add_argument('--memory-rounds', type=int, choices=(1, 3), default=1,
+                        help='Repeat resource attempts and natural TCP cleanup in the same boot')
     args = parser.parse_args()
+    if args.memory_rounds != 1 and not args.memory_accounting:
+        parser.error('--memory-rounds requires --memory-accounting')
     if os.geteuid() == 0:
         parser.error('Build as a normal user; only run.py performs privileged TAP setup.')
     directory = ROOT / 'evidence' / ('esp32-' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ'))
@@ -40,6 +44,8 @@ def main():
     report = {'prepared': False, 'commands': [], 'fixture': str(directory),
               'suite': 'memory-accounting' if args.memory_accounting else 'dns-waits' if args.dns_waits else 'socket-waits' if args.socket_waits else 'timing' if args.timing else ('authentication' if args.authentication else 'smoke'),
               'profile': args.authentication or args.memory_accounting or 'rsa'}
+    if args.memory_accounting:
+        report['memory_rounds'] = args.memory_rounds
 
     def run(command, cwd=ROOT, timeout=600):
         result = subprocess.run(list(map(str, command)), cwd=cwd, env=env,
@@ -84,6 +90,7 @@ def main():
             ('#define LAB_SOCKET_WAITS 1\n' if args.socket_waits else '') +
             ('#define LAB_DNS_WAITS 1\n' if args.dns_waits else '') +
             ('#define LAB_MEMORY_ACCOUNTING 1\n#define LAB_ECDSA ' + str(int(report['profile'] == 'ecdsa')) + '\n'
+             + '#define LAB_MEMORY_ROUNDS ' + str(args.memory_rounds) + '\n'
              if args.memory_accounting else '') +
             ('#define LAB_AUTHENTICATION 1\n#define LAB_ECDSA ' + str(int(args.authentication == 'ecdsa')) + '\n'
              if args.authentication else '') +

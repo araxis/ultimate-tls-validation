@@ -13,6 +13,10 @@
 #include <stdio.h>
 #include <string.h>
 
+#ifndef LAB_MEMORY_ROUNDS
+#define LAB_MEMORY_ROUNDS 1
+#endif
+
 typedef struct {
     SemaphoreHandle_t done;
     unsigned active, timewait, tcp_stack_free;
@@ -77,14 +81,32 @@ static void exchange(tls_stream *stream, void (*check)(bool, const char *))
     check(count == 0 && tls_stream_status(stream) == TLS_OK, "authenticated EOF");
 }
 
+static void cooldown(unsigned attempt, SemaphoreHandle_t done, void (*check)(bool, const char *))
+{
+    allocation_meter_begin();
+    report(attempt, "cooldown-start", done, check);
+    int64_t until = esp_timer_get_time() + 135000000LL;
+    network_snapshot network;
+    do {
+        network = (network_snapshot){.done = done};
+        configASSERT(tcpip_callback(capture_network, &network) == ERR_OK);
+        configASSERT(xSemaphoreTake(done, pdMS_TO_TICKS(1000)) == pdTRUE);
+        if (!network.active && !network.timewait) break;
+        vTaskDelay(pdMS_TO_TICKS(2000));
+    } while (esp_timer_get_time() < until);
+    check(network.active == 0 && network.timewait == 0, "TCP records expired on natural timers");
+    report(attempt, "cooldown-end", done, check);
+    allocation_meter_end();
+}
+
 void resource_probe(bool ready, void (*check)(bool, const char *))
 {
     SemaphoreHandle_t done = xSemaphoreCreateBinary();
     configASSERT(done);
-    printf("RESOURCE_CONFIG cycles=4 stack_element=%zu main_stack=%u tcp_stack=%u tracker_capacity=256\n",
-           sizeof(StackType_t), CONFIG_ESP_MAIN_TASK_STACK_SIZE, TCPIP_THREAD_STACKSIZE);
+    printf("RESOURCE_CONFIG cycles=%u stack_element=%zu main_stack=%u tcp_stack=%u tracker_capacity=256\n",
+           4 * LAB_MEMORY_ROUNDS, sizeof(StackType_t), CONFIG_ESP_MAIN_TASK_STACK_SIZE, TCPIP_THREAD_STACKSIZE);
     check(sizeof(StackType_t) == 1, "stack watermark byte units verified");
-    for (unsigned attempt = 0; attempt < 8; ++attempt) {
+    for (unsigned attempt = 0; attempt < 8 * LAB_MEMORY_ROUNDS; ++attempt) {
         bool rejection = attempt % 2;
         printf("ATTEMPT resource-%u-%s\n", attempt, rejection ? "reject" : "valid");
         allocation_meter_begin();
@@ -118,20 +140,7 @@ void resource_probe(bool ready, void (*check)(bool, const char *))
         vTaskDelay(pdMS_TO_TICKS(500));
         report(attempt, "settled", done, check);
         allocation_meter_end();
+        if ((attempt + 1) % 8 == 0) cooldown(attempt + 1, done, check);
     }
-    allocation_meter_begin();
-    report(8, "cooldown-start", done, check);
-    int64_t until = esp_timer_get_time() + 135000000LL;
-    network_snapshot network;
-    do {
-        network = (network_snapshot){.done = done};
-        configASSERT(tcpip_callback(capture_network, &network) == ERR_OK);
-        configASSERT(xSemaphoreTake(done, pdMS_TO_TICKS(1000)) == pdTRUE);
-        if (!network.active && !network.timewait) break;
-        vTaskDelay(pdMS_TO_TICKS(2000));
-    } while (esp_timer_get_time() < until);
-    check(network.active == 0 && network.timewait == 0, "TCP records expired on natural timers");
-    report(8, "cooldown-end", done, check);
-    allocation_meter_end();
     vSemaphoreDelete(done);
 }
