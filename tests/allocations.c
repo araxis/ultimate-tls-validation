@@ -16,6 +16,25 @@ static _Thread_local struct {
     struct { void *pointer; size_t bytes; } slots[256];
 } allocation;
 
+void allocation_measure_begin(void)
+{
+    if (allocation.enabled) abort();
+    memset(&allocation, 0, sizeof(allocation));
+    allocation.enabled = true;
+}
+
+struct allocation_measurement allocation_measure_read(void)
+{
+    return (struct allocation_measurement){allocation.live, allocation.bytes, allocation.peak};
+}
+
+struct allocation_measurement allocation_measure_end(void)
+{
+    if (!allocation.enabled) abort();
+    allocation.enabled = false;
+    return allocation_measure_read();
+}
+
 void *__wrap_calloc(size_t count, size_t size)
 {
     if (!allocation.enabled) return __real_calloc(count, size);

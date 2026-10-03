@@ -413,6 +413,62 @@ target CPU/copy timing and heap measurements. Moving the buffer into the stream
 would trade stack for per-session heap; sharing one global buffer would also
 require a concurrency design. Neither is a demonstrated memory saving.
 
+## Layered memory accounting on the reference host
+
+```sh
+sudo python3 tools/run_local.py --uid 1000 --binary build/tls_probe --memory
+```
+
+The memory suite keeps two verified TLS sessions open together, closes both,
+observes a two-second settling interval, and repeats four cycles. The first cycle
+establishes the warmed baseline. It then waits for natural TCP timer expiry;
+expect about two minutes for this part. Neither TCP timers nor allocation counters
+are accelerated or reset to make cleanup appear complete. The fixture accounts
+independently for all eight exchanges and the final recovery request.
+
+Normal and undefined-behavior-instrumented runs produced this initial inventory:
+
+| Layer | Measurement | Accounting boundary |
+| --- | --- | --- |
+| TLS allocations | 82,972 requested bytes with two live sessions; 90,072-byte peak; zero after each close | Direct linked calloc/free calls on the owning thread; excludes allocator overhead and other allocation paths |
+| FreeRTOS heap | 2,097,152-byte static reservation; two live sessions consume 896 bytes above baseline | Includes task stack reservations, task objects, queues and semaphores; do not add these again |
+| lwIP heap | 131,072-byte configured capacity; 131,111-byte linked backing; 1,704-byte observed peak | Separate from the FreeRTOS heap and fixed pools; live use returns to zero after settling |
+| lwIP fixed pools | 106,170 bytes of linked backing across 14 pools | Includes 98,823 bytes backing 64 packet buffers; active objects occupy this reserved storage |
+| Executing client pthread stack | 262,080-byte reservation | Separate from the POSIX port's FreeRTOS stack buffer; does not measure actual stack use |
+
+FreeRTOS free space returned to 1,735,248 bytes after each cycle (the observation
+semaphore is included throughout). Two live sessions use two network connections,
+two socket semaphores and two additional receive mailboxes. Payload buffers and
+TCP segments return to baseline after settling. Up to eight TCP control blocks
+remain in `TIME_WAIT`; all were reclaimed by normal timers, with a 119,000-tick
+wait after the last settling interval at the configured 1,000 Hz tick rate.
+Wall-clock suite duration was approximately 140 seconds on this simulator.
+
+Host `mallinfo2` totals are a separate aggregate view: TLS allocations are already
+included, so adding both would double-count. With default allocator caching, the
+normal run's allocated total rose from 9,264 to 31,632 bytes after first use and
+then stayed constant. A separate run with process-local
+`GLIBC_TUNABLES=glibc.malloc.tcache_count=0` reduced that one-time increase to
+1,344 bytes (8,240 to 9,584), again without growth across cycles. An independent
+libc-only `gmtime_r` probe reproduced exactly 1,344 bytes on first use and no
+increase on a second call. Certificate-date checks use this conversion; the
+residual is consistent with host calendar initialization. This is diagnostic
+evidence, not a reason to change the application's allocator configuration or a
+proof covering all process allocations.
+
+Observation overhead is explicit: a semaphore remains allocated for all snapshots,
+the TCP/IP callback occupies one API-message pool slot while capturing counters,
+and allocation-test instrumentation reserves 4,136 thread-local bytes per host
+thread. Pool/list snapshots run in the TCP/IP task under protection. The host
+allocator sample is separate, not a globally simultaneous snapshot. Per-pool
+high-water counters cannot be summed as though all peaks occurred together.
+
+These generous host reservations are not firmware requirements. This suite does
+not measure RSS, all OS mappings, actual task-stack peaks, arbitrary queue/load
+peaks or all allocation paths. Target stack/heap headroom, concurrent failure/load
+budgets and another runtime port remain unqualified. The 512-byte staging buffer
+is temporary stack use; it is not an additional persistent TLS heap allocation.
+
 ## Dependency baseline and limits
 
 `dependencies.json` pins full commits; bootstrap never patches dependencies.
