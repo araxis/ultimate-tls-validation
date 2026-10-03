@@ -5,7 +5,8 @@ header as the host reference. Its small test adapter accepts IPv4 literals only.
 The default smoke test exercises one verified RSA exchange, exact request/response
 bytes, authenticated EOF, socket cleanup and advancing FreeRTOS ticks. Optional
 RSA and P-256 ECDSA profiles test authentication rejection and recovery. These
-tests do not qualify DNS, cancellation, wider concurrency, Wi-Fi or physical hardware.
+tests do not qualify DNS, wider concurrency, Wi-Fi or physical hardware. A separate
+timing profile covers selected handshake/read deadlines and cancellation.
 
 The peer is the existing Python TLS fixture on a private TAP subnet. Certificates
 are generated per build with an IP subject alternative name and independently
@@ -81,11 +82,42 @@ allocation failures or long-run resource retention on this port. Entropy failure
 is injected into the port callback; it does not assess the physical RNG. Recovery
 means a new stream/context after destruction, not reuse of a failed handle.
 
+## Finite waits and recovery
+
+Add `--timing` to preparation for a separate RSA profile with 91 checks across
+four failure cases and four fresh-connection recoveries. This option cannot be
+combined with `--authentication`.
+
+The controlled peer stalls either the handshake or the response read. Each
+operation must end on its overall deadline or cancellation from a second
+FreeRTOS task. Cancellation is armed when the selected transport read callback
+starts; the worker waits five 10 ms ticks before setting the atomic cancellation
+flag. The test joins that worker before releasing its context.
+
+Handshake timeout uses 1500 ms; response-read timeout uses 3000 ms starting at
+open. The read test adds a deliberate 500 ms delay after the request, which must
+consume that original budget. Deadline completion allows 250 ms scheduling
+tolerance; cancellation must return within 250 ms after its signal and before
+the 10-second overall budget. These guest-clock tolerances are acceptance checks,
+not device latency guarantees. Tick alignment can make the five-tick delay
+shorter than 50 ms; the check requires at least 40 ms.
+
+All failures require exact status/stage/error diagnostics, closed sockets,
+refused subsequent I/O, unchanged read buffers and stable diagnostics. Aborted
+handshakes must report certificate verification unavailable (`UINT32_MAX`), while
+reads start after successful verification and retain zero verification flags.
+Recovery uses the same verified byte-exchange checks as the authentication suite.
+The peer independently requires two handshake stalls, two read stalls, six exact
+requests and six matching server-name events with the required RSA suite.
+
+This profile does not cover connect/DNS waits, blocked writes, completion races,
+ECDSA-specific timing, simultaneous connections or task/heap resource budgets.
+
 ## Boundaries
 
 The adapter has nonblocking lwIP socket operations with a bounded wait budget.
-Cancellation is exposed through its context but is not exercised by these
-profiles. DNS ownership and target-specific locking must be validated separately.
+Cancellation is tested in the selected handshake/read cases only. DNS ownership
+and target-specific locking must be validated separately.
 The app uses IDF's own kernel and network configuration, not the host simulator's
 headers. Its 12 KiB main-task allocation is a test setting, not a proven minimum
 stack size. No total heap, leak-freedom, hardware timing or device headroom claim

@@ -23,8 +23,10 @@ def main():
     parser.add_argument('--sdk', required=True, type=Path)
     parser.add_argument('--tools', required=True, type=Path)
     parser.add_argument('--idf-python', required=True, type=Path)
-    parser.add_argument('--authentication', choices=('rsa', 'ecdsa'),
+    suite = parser.add_mutually_exclusive_group()
+    suite.add_argument('--authentication', choices=('rsa', 'ecdsa'),
                         help='Build rejection/recovery cases for this certificate profile')
+    suite.add_argument('--timing', action='store_true', help='Build handshake/read deadline and cancellation cases')
     args = parser.parse_args()
     if os.geteuid() == 0:
         parser.error('Build as a normal user; only run.py performs privileged TAP setup.')
@@ -33,7 +35,7 @@ def main():
     env = os.environ.copy()
     env.update(IDF_PATH=str(args.sdk.resolve()), IDF_TOOLS_PATH=str(args.tools.resolve()))
     report = {'prepared': False, 'commands': [], 'fixture': str(directory),
-              'suite': 'authentication' if args.authentication else 'smoke',
+              'suite': 'timing' if args.timing else ('authentication' if args.authentication else 'smoke'),
               'profile': args.authentication or 'rsa'}
 
     def run(command, cwd=ROOT, timeout=600):
@@ -75,6 +77,7 @@ def main():
         (directory / 'fixture.h').write_text(
             '#define LAB_RUN_ID ' + json.dumps(directory.name) + '\n' +
             '#define LAB_UTC_SECONDS ' + str(utc) + 'LL\n' +
+            ('#define LAB_TIMING 1\n' if args.timing else '') +
             ('#define LAB_AUTHENTICATION 1\n#define LAB_ECDSA ' + str(int(args.authentication == 'ecdsa')) + '\n'
              if args.authentication else '') +
             'static const unsigned char lab_root[] = ' + json.dumps(root) + ';\n')

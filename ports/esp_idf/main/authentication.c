@@ -89,6 +89,12 @@ static void run_case(const authentication_case *test, bool ready,
     idf_transport_destroy(&transport);
 }
 
+void authentication_recovery(const char *label, bool ready, void (*check)(bool, const char *))
+{
+    const authentication_case test = {label, 8443, TLS_OK, TLS_STAGE_HANDSHAKE, 0, 0};
+    run_case(&test, ready, check);
+}
+
 void authentication_probe(bool ready, void (*check)(bool, const char *))
 {
     static const authentication_case cases[] = {

@@ -602,8 +602,10 @@ TLS source through ESP-IDF 5.3.6. Its first ten checks cover one IP-literal RSA
 exchange, exact bytes, authenticated EOF, socket cleanup and scheduled execution.
 Separate RSA and P-256 ECDSA profiles add 83 checks each for wrong-identity and
 wrong-root rejection, missing-clock/entropy failures and recovery on fresh
-connections. This remains partial second-port evidence: cancellation, DNS,
-broader certificate/failure cases, target resource budgets and physical hardware
+connections. A separate 91-check profile covers stalled handshake/read deadlines,
+task-driven cancellation, terminal I/O refusal and fresh-stream recovery. This
+remains partial second-port evidence: DNS, connect/write waits, broader races,
+certificate/failure cases, target resource budgets and physical hardware
 qualification remain open.
 
 `dependencies.json` pins full commits; bootstrap never patches dependencies.
