@@ -357,6 +357,30 @@ failures, simultaneous sessions and long-run stability remain separate work.
 Global heap observations overlap the scoped totals and require separate review;
 zero tracked bytes does not prove complete cleanup of every runtime allocation.
 
+## Certificate dates and abrupt closure
+
+Prepare with `--security` for a separate 98-check RSA profile. It rejects
+expired and future-dated leaves, EOF during handshake, TCP EOF without TLS
+`close_notify`, and a peer reset after authentication. Every case requires the
+exact diagnostic, immediate local socket release, stable terminal I/O behavior
+and a fresh verified exchange. Only a complete authenticated prefix may be
+returned before truncation; abrupt closure must never become successful EOF.
+
+The existing host peer supplies the dated certificates and controlled closures.
+OpenSSL independently verifies the actual IP identity, purpose and chain, then
+the expected date error at the guest fixture UTC. The peer must observe the
+specific expired/unknown certificate alerts and perform each requested closure.
+Normal certificate verification stays enabled. Fixture UTC does not establish
+trusted device time or clock freshness.
+
+The profile uses a 3-second exchange budget with 250 ms scheduling allowance,
+then up to 135 seconds for natural TCP cleanup. The runner allows 200 seconds
+overall. Expected completion is roughly two minutes. It checks zero active and
+closing TCP records and pending DNS, without allocation instrumentation or a
+whole-heap claim. The initial run passed all 98 checks; authentication and smoke
+regressions passed 83 and ten checks. This profile covers RSA only and does not
+qualify arbitrary corrupted input, all completion races or physical hardware.
+
 ## Boundaries
 
 The adapter has nonblocking lwIP socket operations with a bounded wait budget.

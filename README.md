@@ -627,6 +627,12 @@ This remains partial second-port evidence: broader DNS cases and races,
 certificate/failure cases, target resource budgets and physical hardware
 qualification remain open.
 
+An ESP-IDF `--security` profile adds 98 checks for expired/future certificates,
+incomplete handshake, unclean TCP EOF and reset, with fresh authenticated recovery
+after each failure and natural socket cleanup. It reuses the host's RSA fixtures;
+fixture clock provisioning and these selected cases do not establish device
+clock trust, physical entropy or exhaustive security coverage.
+
 `dependencies.json` pins full commits; bootstrap never patches dependencies.
 lwIP uses Ultimate upstream's `26a2215` pin (reports 2.2.1d). Mbed TLS uses the
 `2b96dd8` revision from the existing HTTPS workflow's ESP-IDF 5.3.6 matrix

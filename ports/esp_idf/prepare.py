@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tests'))
 from run_probe import make_certificate
 from authentication import prepare_certificates
+from security import prepare as prepare_security
 
 
 def main():
@@ -24,6 +25,7 @@ def main():
     parser.add_argument('--tools', required=True, type=Path)
     parser.add_argument('--idf-python', required=True, type=Path)
     suite = parser.add_mutually_exclusive_group()
+    suite.add_argument('--security', action='store_true', help='Build RSA certificate-date and abrupt-closure cases')
     suite.add_argument('--authentication', choices=('rsa', 'ecdsa'),
                         help='Build rejection/recovery cases for this certificate profile')
     suite.add_argument('--timing', action='store_true', help='Build handshake/read deadline and cancellation cases')
@@ -43,7 +45,7 @@ def main():
     env = os.environ.copy()
     env.update(IDF_PATH=str(args.sdk.resolve()), IDF_TOOLS_PATH=str(args.tools.resolve()))
     report = {'prepared': False, 'commands': [], 'fixture': str(directory),
-              'suite': 'allocation-failures' if args.allocation_failures else 'memory-accounting' if args.memory_accounting else 'dns-waits' if args.dns_waits else 'socket-waits' if args.socket_waits else 'timing' if args.timing else ('authentication' if args.authentication else 'smoke'),
+              'suite': 'security' if args.security else 'allocation-failures' if args.allocation_failures else 'memory-accounting' if args.memory_accounting else 'dns-waits' if args.dns_waits else 'socket-waits' if args.socket_waits else 'timing' if args.timing else ('authentication' if args.authentication else 'smoke'),
               'profile': args.authentication or args.memory_accounting or args.allocation_failures or 'rsa'}
     if args.memory_accounting:
         report['memory_rounds'] = args.memory_rounds
@@ -83,10 +85,13 @@ def main():
         report['certificate_verification'] = run(['openssl', 'verify', '-CAfile', 'trusted-ca.pem',
             '-no-CApath', '-no-CAstore', '-purpose', 'sslserver', '-verify_ip', '192.0.2.1', 'trusted.pem'], cwd=directory)
         utc = int(time.time())
+        if args.security:
+            prepare_security(directory, utc)
         root = (directory / 'trusted-ca.pem').read_text()
         (directory / 'fixture.h').write_text(
             '#define LAB_RUN_ID ' + json.dumps(directory.name) + '\n' +
             '#define LAB_UTC_SECONDS ' + str(utc) + 'LL\n' +
+            ('#define LAB_SECURITY 1\n' if args.security else '') +
             ('#define LAB_TIMING 1\n' if args.timing else '') +
             ('#define LAB_SOCKET_WAITS 1\n' if args.socket_waits else '') +
             ('#define LAB_DNS_WAITS 1\n' if args.dns_waits else '') +
