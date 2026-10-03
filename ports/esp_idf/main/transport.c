@@ -56,6 +56,7 @@ static bool wait_socket(idf_transport *transport, bool write, int64_t deadline)
 static int open_socket(void *context, const char *host, uint16_t port, uint32_t budget)
 {
     idf_transport *transport = context;
+    ++transport->open_calls;
     int64_t deadline = now_ms(NULL) + budget;
     struct sockaddr_in address = {0};
     address.sin_family = AF_INET;
@@ -103,6 +104,7 @@ int idf_transport_init(idf_transport *transport, const unsigned char *pem, size_
 {
     transport->socket_fd = -1;
     transport->clock_ready = false;
+    transport->open_calls = 0;
     atomic_init(&transport->cancel_requested, false);
     mbedtls_x509_crt_init(&transport->roots);
     return mbedtls_x509_crt_parse(&transport->roots, pem, length);

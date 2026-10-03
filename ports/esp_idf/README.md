@@ -2,9 +2,10 @@
 
 A separate ESP-IDF application compiles the same `src/tls_stream.c` and public
 header as the host reference. Its small test adapter accepts IPv4 literals only.
-This first slice exercises one verified RSA exchange, exact request/response
-bytes, authenticated EOF, socket cleanup and advancing FreeRTOS ticks. It does
-not qualify DNS, cancellation, wider concurrency, Wi-Fi or physical hardware.
+The default smoke test exercises one verified RSA exchange, exact request/response
+bytes, authenticated EOF, socket cleanup and advancing FreeRTOS ticks. Optional
+RSA and P-256 ECDSA profiles test authentication rejection and recovery. These
+tests do not qualify DNS, cancellation, wider concurrency, Wi-Fi or physical hardware.
 
 The peer is the existing Python TLS fixture on a private TAP subnet. Certificates
 are generated per build with an IP subject alternative name and independently
@@ -47,12 +48,45 @@ the idle emulator; that termination is not represented as a guest exit code.
 Prepare a new fixture for every attempt, including after failure; existing run
 results are never overwritten. No serial device or flashing command is used.
 
+## Authentication rejection and recovery
+
+Add `--authentication rsa` or `--authentication ecdsa` to the preparation command.
+Run each fresh image with the same runner; it reads the profile from the saved
+build result. The default command remains the ten-check smoke test.
+
+Each authentication profile requires 83 checks across nine ordered attempts:
+
+1. Valid chain and exact exchange.
+2. Wrong IP identity, then a successful fresh connection.
+3. Untrusted root, then a successful fresh connection.
+4. Clock unavailable, then a successful fresh connection.
+5. Entropy callback failure, then a successful fresh connection.
+
+Each rejected attempt checks the exact public status, stage, library error and
+certificate flags. Subsequent reads/writes must fail, the caller's read buffer
+must remain unchanged, and the failure diagnostic must remain stable. Socket
+release is checked after failed open and after destruction. A test-adapter counter
+proves clock and entropy failures occur without invoking transport open.
+
+The independent server requires five exact requests, seven matching server-name
+events, a bad-certificate alert for the wrong identity, and an unknown-CA alert
+for the untrusted root. Unexpected events or missing/duplicate guest results fail
+the run. Both certificate profiles are independently checked with OpenSSL before
+building, including exact IP-mismatch and untrusted-root rejection. ECDSA uses a
+binary response body to exercise embedded zero and high-bit bytes.
+
+These cases use directly signed RSA-2048 or P-256 certificates. They do not cover
+expired/future certificates, intermediates, mixed algorithms, other curves,
+allocation failures or long-run resource retention on this port. Entropy failure
+is injected into the port callback; it does not assess the physical RNG. Recovery
+means a new stream/context after destruction, not reuse of a failed handle.
+
 ## Boundaries
 
 The adapter has nonblocking lwIP socket operations with a bounded wait budget.
-Cancellation is exposed through its context but is not exercised by this first
-probe. DNS ownership and target-specific locking must be validated separately.
+Cancellation is exposed through its context but is not exercised by these
+profiles. DNS ownership and target-specific locking must be validated separately.
 The app uses IDF's own kernel and network configuration, not the host simulator's
 headers. Its 12 KiB main-task allocation is a test setting, not a proven minimum
 stack size. No total heap, leak-freedom, hardware timing or device headroom claim
-follows from this smoke test.
+follows from these tests.

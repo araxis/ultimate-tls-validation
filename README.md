@@ -600,8 +600,11 @@ TLS 1.3, target performance and firmware qualification remain outside this test.
 An additional [ESP32-S3 emulator probe](ports/esp_idf/README.md) builds the same
 TLS source through ESP-IDF 5.3.6. Its first ten checks cover one IP-literal RSA
 exchange, exact bytes, authenticated EOF, socket cleanup and scheduled execution.
-This is initial second-port evidence; authentication failure, cancellation, DNS,
-target resource budgets and physical hardware qualification remain open.
+Separate RSA and P-256 ECDSA profiles add 83 checks each for wrong-identity and
+wrong-root rejection, missing-clock/entropy failures and recovery on fresh
+connections. This remains partial second-port evidence: cancellation, DNS,
+broader certificate/failure cases, target resource budgets and physical hardware
+qualification remain open.
 
 `dependencies.json` pins full commits; bootstrap never patches dependencies.
 lwIP uses Ultimate upstream's `26a2215` pin (reports 2.2.1d). Mbed TLS uses the

@@ -1,5 +1,6 @@
 #include "transport.h"
 #include "fixture.h"
+#include "authentication.h"
 #include "esp_eth.h"
 #include "esp_event.h"
 #include "esp_netif.h"
@@ -75,6 +76,9 @@ void app_main(void)
     struct timeval utc = {.tv_sec = LAB_UTC_SECONDS, .tv_usec = 0};
     bool clock_ready = settimeofday(&utc, NULL) == 0;
     check(clock_ready, "fixture UTC installed");
+#ifdef LAB_AUTHENTICATION
+    authentication_probe(connected && clock_ready, check);
+#else
     idf_transport transport;
     int loaded = idf_transport_init(&transport, lab_root, sizeof(lab_root));
     check(loaded == 0, "fixture trust anchor loaded");
@@ -111,6 +115,7 @@ void app_main(void)
     tls_stream_destroy(stream);
     check(transport.socket_fd == -1, "socket released");
     idf_transport_destroy(&transport);
+#endif
     ESP_ERROR_CHECK(esp_eth_stop(driver));
     ESP_ERROR_CHECK(esp_event_handler_unregister(IP_EVENT, IP_EVENT_ETH_GOT_IP, got_ip));
     ESP_ERROR_CHECK(esp_eth_del_netif_glue(glue));

@@ -15,6 +15,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tests'))
 from run_probe import make_certificate
+from authentication import prepare_certificates
 
 
 def main():
@@ -22,6 +23,8 @@ def main():
     parser.add_argument('--sdk', required=True, type=Path)
     parser.add_argument('--tools', required=True, type=Path)
     parser.add_argument('--idf-python', required=True, type=Path)
+    parser.add_argument('--authentication', choices=('rsa', 'ecdsa'),
+                        help='Build rejection/recovery cases for this certificate profile')
     args = parser.parse_args()
     if os.geteuid() == 0:
         parser.error('Build as a normal user; only run.py performs privileged TAP setup.')
@@ -29,7 +32,9 @@ def main():
     directory.mkdir(parents=True)
     env = os.environ.copy()
     env.update(IDF_PATH=str(args.sdk.resolve()), IDF_TOOLS_PATH=str(args.tools.resolve()))
-    report = {'prepared': False, 'commands': [], 'fixture': str(directory)}
+    report = {'prepared': False, 'commands': [], 'fixture': str(directory),
+              'suite': 'authentication' if args.authentication else 'smoke',
+              'profile': args.authentication or 'rsa'}
 
     def run(command, cwd=ROOT, timeout=600):
         result = subprocess.run(list(map(str, command)), cwd=cwd, env=env,
@@ -54,12 +59,15 @@ def main():
         with zipfile.ZipFile(directory / 'source.zip', 'x', compression=zipfile.ZIP_DEFLATED) as archive:
             for name in manifest:
                 archive.write(ROOT / name, name)
-        make_certificate(directory, 'trusted')
-        extension = directory / 'trusted.ext'
-        extension.write_text(extension.read_text().replace('DNS:tls.lab.test', 'DNS:tls.lab.test,IP:192.0.2.1'))
-        run(['openssl', 'x509', '-req', '-in', 'trusted.csr', '-CA', 'trusted-ca.pem',
-             '-CAkey', 'trusted-ca.key', '-set_serial', '1', '-days', '2',
-             '-out', 'trusted.pem', '-extfile', 'trusted.ext'], cwd=directory)
+        if args.authentication:
+            prepare_certificates(directory, args.authentication == 'ecdsa')
+        else:
+            make_certificate(directory, 'trusted')
+            extension = directory / 'trusted.ext'
+            extension.write_text(extension.read_text().replace('DNS:tls.lab.test', 'DNS:tls.lab.test,IP:192.0.2.1'))
+            run(['openssl', 'x509', '-req', '-in', 'trusted.csr', '-CA', 'trusted-ca.pem',
+                 '-CAkey', 'trusted-ca.key', '-set_serial', '1', '-days', '2',
+                 '-out', 'trusted.pem', '-extfile', 'trusted.ext'], cwd=directory)
         report['certificate_verification'] = run(['openssl', 'verify', '-CAfile', 'trusted-ca.pem',
             '-no-CApath', '-no-CAstore', '-purpose', 'sslserver', '-verify_ip', '192.0.2.1', 'trusted.pem'], cwd=directory)
         utc = int(time.time())
@@ -67,6 +75,8 @@ def main():
         (directory / 'fixture.h').write_text(
             '#define LAB_RUN_ID ' + json.dumps(directory.name) + '\n' +
             '#define LAB_UTC_SECONDS ' + str(utc) + 'LL\n' +
+            ('#define LAB_AUTHENTICATION 1\n#define LAB_ECDSA ' + str(int(args.authentication == 'ecdsa')) + '\n'
+             if args.authentication else '') +
             'static const unsigned char lab_root[] = ' + json.dumps(root) + ';\n')
         report['fixture_utc_seconds'] = utc
         cache = Path.home() / '.cache/ultimate-tls-validation'

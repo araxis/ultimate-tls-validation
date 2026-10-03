@@ -15,6 +15,7 @@ import time
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tests'))
 from run_probe import Peers
+from authentication import CHECKS, account
 
 
 def probe(args):
@@ -27,7 +28,9 @@ def probe(args):
             raise ValueError('Prepared artifact changed: ' + name)
     if (directory / 'result.json').exists():
         raise ValueError('Evidence already contains a run; prepare a new fixture')
-    peers = Peers(directory)
+    authentication = build.get('suite') == 'authentication'
+    ecdsa = build.get('profile') == 'ecdsa'
+    peers = Peers(directory, ecdsa=ecdsa)
     command = [str(args.qemu.resolve()), '-machine', 'esp32s3', '-display', 'none',
                '-serial', 'stdio', '-monitor', 'none',
                '-drive', f'file={directory / "flash.bin"},if=mtd,format=raw', '-snapshot',
@@ -39,6 +42,9 @@ def probe(args):
     start = time.monotonic()
     try:
         peers.listen(socket.SOCK_STREAM, 8443, peers.tls, 'trusted')
+        if authentication:
+            peers.listen(socket.SOCK_STREAM, 8444, peers.tls, 'wrong-host')
+            peers.listen(socket.SOCK_STREAM, 8445, peers.tls, 'untrusted')
         # Keep input open: EOF disconnects QEMU's stdio character backend.
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.PIPE)
         # Read bytes instead of blocking readline, retaining partial panic output.
@@ -83,16 +89,23 @@ def probe(args):
                and requests[0]['cipher'] == 'ECDHE-RSA-AES128-GCM-SHA256'
                and [e['name'] for e in peers.events if e['kind'] == 'sni'] == ['192.0.2.1']
                and not any(e['kind'] in ('fixture-error', 'tls-alert') for e in peers.events))
-    passed = (failure is None and completed and len(summaries) == 1 and summaries[0][:2] == ('10', '0')
+    accounting = account(text, peers.events, ecdsa) if authentication else {}
+    if authentication:
+        peer_ok = accounting['peer_accounting_passed']
+    expected_checks = CHECKS if authentication else 10
+    passed = (failure is None and completed and len(summaries) == 1 and summaries[0][:2] == (str(expected_checks), '0')
               and int(summaries[0][2]) > 0 and summaries[0][3] == directory.name
-              and len(re.findall(r'^PASS ', text, re.M)) == 10
+              and len(re.findall(r'^PASS ', text, re.M)) == expected_checks
+              and accounting.get('complete_attempts', True)
               and not re.search(r'^FAIL|Guru Meditation|assert failed|abort\(\) was called', text, re.M) and peer_ok)
     report = {'passed': passed, 'guest_completed': completed, 'failure': failure,
+              'suite': build.get('suite', 'smoke'), 'profile': build.get('profile', 'rsa'),
+              'authentication': accounting,
               'peer_accounting_passed': peer_ok, 'checks': int(summaries[0][0]) if len(summaries) == 1 else None,
               'elapsed_seconds': time.monotonic() - start, 'command': command,
               'qemu_sha256': hashlib.sha256(args.qemu.read_bytes()).hexdigest(),
               'image_sha256': hashlib.sha256((directory / 'flash.bin').read_bytes()).hexdigest(),
-              'scope': 'One IP-literal RSA exchange under ESP32-S3 emulation; no DNS, fault matrix or hardware qualification'}
+              'scope': 'IP-literal exchanges under ESP32-S3 emulation; no DNS, cancellation, target accounting or hardware qualification'}
     (directory / 'result.json').write_text(json.dumps(report, indent=2) + '\n')
     print(text)
     print(json.dumps(report, indent=2))

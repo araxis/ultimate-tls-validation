@@ -8,6 +8,7 @@
  * Initial feasibility accepts IPv4 literals only; no DNS coverage is claimed. */
 typedef struct {
     int socket_fd;
+    unsigned open_calls;
     bool clock_ready;
     atomic_bool cancel_requested;
     mbedtls_x509_crt roots;
