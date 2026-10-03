@@ -251,6 +251,62 @@ layout change is introduced. A failed write may already have reached the peer, s
 failure does not authorize automatic retry. All failed handles remain unusable;
 authenticated EOF still requires destruction to release the socket.
 
+## Host memory and direct stack frames
+
+Compile a before/after comparison without changing the runtime build:
+
+```sh
+python3 tools/measure_stack.py --build build --baseline 3a7982d51f9ff16f25342810a91c692c047d10e4
+```
+
+The tool reads the actual Ninja compiler command, preserves its include paths and
+configuration, and adds GCC `-fstack-usage` for isolated source copies. It also
+compiles `-O2` and `-Os` comparisons; these two profiles are compile-only measurements,
+not runtime-qualified builds. Each fresh `evidence/stack-*` directory preserves
+commands, compiler identity/target, source hashes, objects, frame reports, layout
+symbols and disassembly. A successful result means the measurement completed and
+object layouts stayed equal, not that a firmware memory budget passed.
+
+GCC 15.2.0 on x86-64 reported these direct `tls_stream_read` frame sizes for the
+read-output staging fix:
+
+| Compilation | Before | After | Increase |
+| --- | ---: | ---: | ---: |
+| Existing debug flags | 64 bytes | 592 bytes | 528 bytes |
+| `-O2` | 48 bytes | 576 bytes | 528 bytes |
+| `-Os` | 48 bytes | 576 bytes | 528 bytes |
+
+These are individual compiler-reported frames, excluding callers, callees, TLS
+crypto, transport code, interrupts and signals. They are not peak task stacks or
+safe task-stack settings. The increase exceeds the 512-byte payload buffer because
+the generated frame also changes; other architectures/compilers may differ.
+
+The opaque stream object remains 1,416 bytes in this host ABI. Its embedded SSL
+context (568 bytes), configuration (392 bytes) and DRBG (344 bytes) are already
+included in that total and must not be added again. A trust-store root node is
+744 bytes before separately allocated certificate/key data. These sizes are not
+portable firmware constants. The tracked handshake runs measured 41,486 bytes
+retained after successful open and a 48,586-byte requested-allocation peak; all
+tracked allocations returned to zero after destruction. Those figures include
+stream/trust/TLS allocations within the existing per-task calloc scope, exclude
+allocator overhead and other tasks, and do not establish whole-process leak freedom.
+
+The POSIX port reserves a FreeRTOS task stack but calls `pthread_attr_setstacksize`
+and `pthread_create` without assigning that buffer as the pthread stack. Execution
+therefore uses a separate host stack. A FreeRTOS watermark of the reserved buffer
+would not measure TLS execution. The probe's 32,768 StackType_t depth corresponds
+to a 262,144-byte reservation with this 8-byte host type; the lwIP port interprets
+its 32,768 stack setting as bytes instead. Neither is a device budget. The configured
+2 MiB FreeRTOS heap and 128 KiB lwIP heap are also separate from host TLS calloc.
+
+Before integration, collect frames and call-chain/stack observations with the exact
+target compiler, firmware configuration and FreeRTOS port; include cryptographic
+peaks, interrupt overhead, concurrent sessions, retained TCP state and safety margin.
+Account TLS allocations, RTOS objects/stacks and network buffers without double
+counting. The read copy's execution cost, whole-process retention, and target stack
+headroom remain unqualified. Keep the verified failure semantics while evaluating
+those budgets; host measurements alone do not justify shrinking task stacks.
+
 Socket waits poll the atomic cancellation flag in slices of at most 10 ms. DNS
 submission to the TCP/IP task is nonblocking. Already submitted DNS queries can
 continue after the caller has returned; the fixed `DNS_TABLE_SIZE` slot pool
