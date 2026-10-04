@@ -1,5 +1,8 @@
 # Standalone TLS validation
 
+For the current source revisions, results and remaining integration work, see
+[the 4 October 2026 review checkpoint](VALIDATION.md).
+
 A local feasibility project for authenticated byte streams over FreeRTOS and
 lwIP. The request driver sends a small HTTP request to a controlled TLS peer.
 It does not depend on an Ultimate checkout, ESP32 communication, UCI, device
